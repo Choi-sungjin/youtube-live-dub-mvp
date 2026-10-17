@@ -5,27 +5,28 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.5.2";
+  const BUILD_VERSION = "0.6.0";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
   const DEFAULT_ORIGINAL_VOLUME = 35;
   const PREPARE_LEAD_SECONDS = 0.18;
-  const BUFFER_WINDOW_SECONDS = 180;
-  const NEXT_BUFFER_THRESHOLD_SECONDS = 110;
-  const MAX_PREPARE_CHUNKS = 20;
+  const BUFFER_WINDOW_SECONDS = 90;
+  const NEXT_BUFFER_THRESHOLD_SECONDS = 60;
+  const MAX_PREPARE_CHUNKS = 4;
   const BUFFER_CHECK_INTERVAL_MS = 1000;
-  const MIN_START_BUFFER_SECONDS = 8;
-  const MIN_START_BUFFER_CLIPS = 2;
+  const MIN_START_BUFFER_SECONDS = 12;
+  const MIN_START_BUFFER_CLIPS = 4;
+  const SEEK_BUFFER_CLIPS = 2;
   const TEXT_TRACK_WAIT_MS = 4500;
-  const CAPTION_FETCH_BUDGET_MS = 12000;
+  const CAPTION_FETCH_BUDGET_MS = 3500;
   const PAGE_CAPTION_PRIME_WAIT_MS = 7500;
   const PREPROCESS_WAIT_MS = 8 * 60 * 1000;
-  const PREPROCESS_POLL_MS = 5000;
-  const INITIAL_STT_DURATION_SECONDS = 240;
+  const PREPROCESS_POLL_MS = 1000;
+  const INITIAL_STT_DURATION_SECONDS = 35;
   const STT_MODEL = "tiny";
-  const STT_EXTENSION_SECONDS = 240;
-  const STT_EXTENSION_THRESHOLD_SECONDS = 300;
+  const STT_EXTENSION_SECONDS = 120;
+  const STT_EXTENSION_THRESHOLD_SECONDS = 90;
   const STT_EXTENSION_OVERLAP_SECONDS = 2;
   const STT_MAX_DURATION_SECONDS = 2 * 60 * 60;
   const ENABLE_VISIBLE_CAPTION_FALLBACK = false;
@@ -44,7 +45,11 @@
     originalVideoVolume: null,
     originalMuted: null,
     resumeVideoAfterPrepare: false,
+    playbackHold: null,
+    lastSyncVideoTime: null,
+    metrics: null,
     sourceSegments: [],
+    transcriptWindows: [],
     chunks: [],
     prepared: [],
     preparedChunkIndexes: new Set(),
@@ -338,6 +343,10 @@
 
     const sessionId = ++state.sessionId;
     state.running = true;
+    state.playbackHold = null;
+    state.lastSyncVideoTime = null;
+    state.transcriptWindows = [];
+    state.metrics = { startedAt: Date.now(), firstAudioMs: null, bufferWaits: 0, bufferWaitMs: 0, tailWaits: 0, lastPrepareMs: 0, playedClips: 0 };
     stopTestAudio();
     state.lastError = "";
     els.start.disabled = true;
@@ -518,6 +527,8 @@
     state.originalVideoVolume = null;
     state.originalMuted = null;
     state.resumeVideoAfterPrepare = false;
+    finishPlaybackHold();
+    state.lastSyncVideoTime = null;
     state.transcriptExpanding = false;
     state.transcriptTargetDuration = 0;
 
@@ -554,6 +565,31 @@
 
     applyOriginalVolume();
 
+    const videoTime = getVideoTime();
+    const jumped = state.lastSyncVideoTime !== null && Math.abs(videoTime - state.lastSyncVideoTime) > 1.2;
+    state.lastSyncVideoTime = videoTime;
+    if (jumped) {
+      stopCurrentAudio();
+      if (state.playbackHold) state.playbackHold.reason = 'buffer';
+    }
+    maybePrepareMoreAudio(videoTime, "sync");
+
+    if (state.playbackHold) {
+      const speechRemaining = state.currentAudio && !state.currentAudio.ended &&
+        state.currentAudio.duration - state.currentAudio.currentTime > 0.08;
+      const currentReady = state.prepared.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+      const noCaptionNow = !state.chunks.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+      const enoughAudio = currentReady && (hasStartBufferReady(videoTime) || !selectUnpreparedChunksForWindow(state.chunks, videoTime).length);
+      const naturalGapReady = noCaptionNow && (isTranscriptKnownAt(videoTime) || (!state.transcriptWindows.length && !state.transcriptExpanding));
+      if (!speechRemaining && (enoughAudio || naturalGapReady || (state.playbackHold.reason === 'tail' && noCaptionNow))) {
+        finishPlaybackHold();
+        resumeVideoIfNeeded();
+      } else {
+        if (!state.video.paused) state.video.pause();
+        return;
+      }
+    }
+
     if (state.video.paused || state.video.ended) {
       if (state.currentAudio && !state.currentAudio.paused) {
         state.currentAudio.pause();
@@ -561,12 +597,19 @@
       return;
     }
 
-    const videoTime = getVideoTime();
-    maybePrepareMoreAudio(videoTime, "sync");
-
     const chunkIndex = state.prepared.findIndex((item) => {
       return videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end;
     });
+
+    const nextItem = state.prepared[chunkIndex];
+    const previousItem = state.prepared.find(item => item.chunkIndex === state.currentChunkIndex);
+    const previousStillSpeaking = previousItem && state.currentAudio && !state.currentAudio.ended &&
+      state.currentAudio.duration - state.currentAudio.currentTime > 0.08;
+    const expectedCaption = state.chunks.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+    if (!jumped && previousStillSpeaking && nextItem?.chunkIndex !== state.currentChunkIndex) {
+      if (expectedCaption) holdPlayback(chunkIndex === -1 ? 'buffer' : 'tail');
+      return;
+    }
 
     if (chunkIndex === -1) {
       updateMeta(
@@ -575,6 +618,8 @@
         formatAudioState(state.preparingChunks ? "buffering" : "waiting", videoTime)
       );
       stopCurrentAudio();
+      const transcriptEnded = !isTranscriptKnownAt(videoTime) && (state.transcriptWindows.length > 0 || (state.transcriptExpanding && videoTime >= getLastSegmentEnd(state.sourceSegments))) && videoTime < (state.video.duration || Infinity) - 0.3;
+      if (expectedCaption || transcriptEnded) holdPlayback('buffer');
       return;
     }
 
@@ -621,6 +666,22 @@
     }
   }
 
+  function holdPlayback(reason) {
+    if (state.playbackHold || state.video.paused || state.video.ended) return;
+    state.playbackHold = { reason, startedAt: Date.now() };
+    state.resumeVideoAfterPrepare = true;
+    if (state.metrics) state.metrics[reason === 'tail' ? 'tailWaits' : 'bufferWaits']++;
+    state.video.pause();
+    setStatus(reason === 'tail' ? 'finishing speech' : 'buffering');
+  }
+
+  function finishPlaybackHold() {
+    if (state.playbackHold?.reason === 'buffer' && state.metrics) {
+      state.metrics.bufferWaitMs += Date.now() - state.playbackHold.startedAt;
+    }
+    state.playbackHold = null;
+  }
+
   function stopCurrentAudio() {
     if (!state.currentAudio) {
       return;
@@ -654,8 +715,11 @@
       return;
     }
 
+    const currentChunk = state.chunks.find((chunk) => chunk.end > videoTime);
+    const needsCurrentAudio = currentChunk && !state.preparedChunkIndexes.has(currentChunk.index);
+    const requestedChunks = needsCurrentAudio ? nextChunks.slice(0, SEEK_BUFFER_CLIPS) : nextChunks;
     const sessionId = state.sessionId;
-    prepareAndAppendChunks(nextChunks).catch((error) => {
+    prepareAndAppendChunks(requestedChunks).catch((error) => {
       if (!isActiveSession(sessionId)) return;
       console.error("[YouTube Live Dub MVP] Rolling buffer failed.", error);
       state.lastError = error.message || String(error);
@@ -692,6 +756,7 @@
     );
 
     try {
+      const prepareStarted = Date.now();
       const response = await requestDubPrepare({
         backendUrl: els.backend.value,
         videoId: state.videoId,
@@ -701,6 +766,7 @@
         segments: pending,
       });
       if (!isActiveSession(sessionId)) return 0;
+      if (state.metrics) state.metrics.lastPrepareMs = Date.now() - prepareStarted;
       const prepared = normalizePreparedAudio(response, pending);
 
       if (!prepared.length) {
@@ -713,14 +779,16 @@
         return 0;
       }
 
-      prepared.forEach((item) => {
+      const validPrepared = prepared.filter(item => state.chunks.some(chunk => chunk.index === item.chunkIndex));
+      prepared.filter(item => !validPrepared.includes(item)).forEach(item => item.audio?.pause());
+      validPrepared.forEach((item) => {
         state.preparedChunkIndexes.add(item.chunkIndex);
       });
       state.prepared = state.prepared
-        .concat(prepared)
+        .concat(validPrepared)
         .sort((a, b) => a.start - b.start);
 
-      if (hasStartBufferReady(getVideoTime())) {
+      if (!state.playbackHold && hasStartBufferReady(getVideoTime())) {
         resumeVideoIfNeeded();
       }
 
@@ -730,7 +798,7 @@
         `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
         formatAudioState(`${state.prepared.length}/${state.chunks.length} clips buffered`, getVideoTime())
       );
-      return prepared.length;
+      return validPrepared.length;
     } finally {
       if (state.sessionId === sessionId) state.preparingChunks = false;
       if (isActiveSession(sessionId)) {
@@ -796,6 +864,12 @@
 
   function playAudio(audio) {
     const promise = audio.play();
+    if (promise?.then) promise.then(() => {
+      if (state.running && state.currentAudio === audio && state.metrics) {
+        if (state.metrics.firstAudioMs === null) state.metrics.firstAudioMs = Date.now() - state.metrics.startedAt;
+        state.metrics.playedClips++;
+      }
+    }, () => {});
     if (promise && typeof promise.catch === "function") {
       promise.catch((error) => {
         state.lastError = `Audio play failed: ${error.message || String(error)}. Click the YouTube video once, then press Start again.`;
@@ -927,23 +1001,18 @@
     if (tracks.length) {
       const parsed = await collectCaptionTracksWithBudget(tracks, videoId, sessionId);
       if (!isActiveSession(sessionId)) return [];
-      if (parsed.length) return parsed;
+      if (parsed.length) {
+        state.transcriptWindows = [{ start: 0, end: state.video?.duration || getLastSegmentEnd(parsed) }];
+        return parsed;
+      }
     }
 
-    const primedSegments = await requestPageCaptionPrime(videoId);
-      if (!isActiveSession(sessionId)) return [];
-    if (primedSegments.length) {
-      return primedSegments;
-    }
-
-    const textTrackSegments = await collectVideoTextTrackSegments();
-      if (!isActiveSession(sessionId)) return [];
+    const textTrackSegments = readVideoTextTrackSegments();
     if (textTrackSegments.length) {
       return textTrackSegments;
     }
 
-    const transcriptSegments = await fetchPageTranscriptSegments(videoId);
-      if (!isActiveSession(sessionId)) return [];
+    const transcriptSegments = state.pageTranscriptVideoId === videoId ? state.pageTranscriptSegments : [];
     if (transcriptSegments.length) {
       return transcriptSegments;
     }
@@ -956,7 +1025,10 @@
       }
     }
 
-    return fetchFallbackCaptionSegments(videoId, fallbackReason);
+    const localSegments = await preprocessCaptionSegments(videoId, cached);
+    if (!isActiveSession(sessionId)) return [];
+    if (localSegments.length) return localSegments;
+    throw new Error(`${fallbackReason}; local speech recognition did not return captions.`);
   }
 
   function getPlayerCaptionTracks(playerResponse) {
@@ -1588,12 +1660,35 @@
     throw new Error(`${reason} for video ${videoId}. Try the sample: https://www.youtube.com/watch?v=kBXQZMmiA4s`);
   }
 
+  function updateTranscriptWindows(payload) {
+    for (const range of payload?.windows || []) {
+      const start = Number(range.start), end = Number(range.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      if (!state.transcriptWindows.some(item => item.start === start && item.end === end)) state.transcriptWindows.push({ start, end });
+    }
+  }
+
+  function isTranscriptKnownAt(time) {
+    return state.transcriptWindows.some(range => time >= range.start && time < range.end);
+  }
+
+  function getKnownTranscriptEndAt(time) {
+    let end = time;
+    for (const range of [...state.transcriptWindows].sort((a, b) => a.start - b.start)) {
+      if (range.start <= end + 0.05 && range.end > end) end = range.end;
+    }
+    return end;
+  }
+
   function segmentsCoverPlaybackStart(segments, videoTime) {
     if (!Array.isArray(segments) || !segments.length) {
       return false;
     }
 
     const safeTime = Number.isFinite(videoTime) ? videoTime : 0;
+    if (state.transcriptWindows.length) {
+      return state.transcriptWindows.some(range => range.start <= safeTime + 2 && range.end >= Math.min(safeTime + MIN_START_BUFFER_SECONDS, state.video?.duration || Infinity));
+    }
     const firstStart = Number(segments[0]?.start) || 0;
     const lastEnd = getLastSegmentEnd(segments);
     if (safeTime < firstStart - 2) {
@@ -1603,6 +1698,7 @@
   }
 
   async function fetchBackendCaptionSegments(videoId, options = {}) {
+    const sessionId = state.sessionId;
     try {
       const response = await chrome.runtime.sendMessage({
         type: "YLD_FETCH_CAPTIONS",
@@ -1616,6 +1712,9 @@
       if (!response || !response.ok) {
         return [];
       }
+
+      if (!isActiveSession(sessionId)) return [];
+      updateTranscriptWindows(response.payload);
 
       return Array.isArray(response.payload?.segments)
         ? response.payload.segments.map((segment) => ({
@@ -1634,8 +1733,7 @@
     const sessionId = state.sessionId;
     try {
       const videoTime = getVideoTime();
-      const cachedLastEnd = getLastSegmentEnd(seedSegments);
-      const needsCurrentWindow = videoTime > 20 && cachedLastEnd < videoTime + MIN_START_BUFFER_SECONDS;
+      const needsCurrentWindow = videoTime > 20;
       const startTime = needsCurrentWindow
         ? Math.max(0, videoTime - STT_EXTENSION_OVERLAP_SECONDS)
         : 0;
@@ -1660,6 +1758,7 @@
         sttModel: STT_MODEL,
         maxDuration,
         prewarmSegments: 0,
+        force: !segmentsCoverPlaybackStart(seedSegments, videoTime),
         settings: dubbingSettingsFromControls(),
       };
       if (needsCurrentWindow) {
@@ -1678,6 +1777,7 @@
       }
 
       if (!isActiveSession(sessionId)) return [];
+      updateTranscriptWindows(startResponse.payload);
       const immediateSegments = normalizePreprocessSegments(startResponse.payload?.segments);
       if (immediateSegments.length) {
         return immediateSegments;
@@ -1696,9 +1796,9 @@
         await delay(PREPROCESS_POLL_MS);
         if (!isActiveSession(sessionId)) return [];
 
-        const cachedSegments = await fetchBackendCaptionSegments(videoId);
+        const cachedSegments = await fetchBackendCaptionSegments(videoId, { cacheOnly: true });
         if (!isActiveSession(sessionId)) return [];
-        if (cachedSegments.length) {
+        if (segmentsCoverPlaybackStart(cachedSegments, videoTime)) {
           state.transcriptTargetDuration = Math.max(state.transcriptTargetDuration, getLastSegmentEnd(cachedSegments));
           return cachedSegments;
         }
@@ -1717,6 +1817,7 @@
 
         lastStatus = statusResponse.payload?.status || lastStatus;
         if (!isActiveSession(sessionId)) return [];
+        updateTranscriptWindows(statusResponse.payload);
         const segments = normalizePreprocessSegments(statusResponse.payload?.segments);
         if (segments.length) {
           state.transcriptTargetDuration = Math.max(state.transcriptTargetDuration, getLastSegmentEnd(segments));
@@ -1749,9 +1850,10 @@
       return;
     }
 
-    const lastEnd = getLastSegmentEnd(state.sourceSegments);
+    const missingCurrentWindow = state.transcriptWindows.length > 0 && !isTranscriptKnownAt(videoTime);
+    const lastEnd = state.transcriptWindows.length ? getKnownTranscriptEndAt(videoTime) : getLastSegmentEnd(state.sourceSegments);
+    const videoEnd = Math.min(STT_MAX_DURATION_SECONDS, state.video?.duration || Infinity);
     const remainingTranscript = lastEnd - videoTime;
-    const lastChunk = state.chunks[state.chunks.length - 1];
     const currentChunkIndex = state.chunks.findIndex((chunk) => {
       return videoTime >= chunk.start - PREPARE_LEAD_SECONDS && videoTime < chunk.end;
     });
@@ -1760,20 +1862,17 @@
       : state.chunks.length - currentChunkIndex - 1;
 
     if (
-      lastEnd >= STT_MAX_DURATION_SECONDS ||
+      !missingCurrentWindow && (lastEnd >= videoEnd - 0.3 ||
       (remainingTranscript > STT_EXTENSION_THRESHOLD_SECONDS && chunksRemaining > 10)
+      )
     ) {
       return;
     }
 
-    const currentTarget = Math.max(
-      state.transcriptTargetDuration || 0,
-      lastChunk?.end || 0,
-      lastEnd
-    );
+    const currentTarget = lastEnd;
     const nextTarget = Math.min(
-      STT_MAX_DURATION_SECONDS,
-      Math.max(currentTarget + STT_EXTENSION_SECONDS, videoTime + BUFFER_WINDOW_SECONDS)
+      videoEnd,
+      missingCurrentWindow ? videoTime + INITIAL_STT_DURATION_SECONDS : Math.max(currentTarget + STT_EXTENSION_SECONDS, videoTime + BUFFER_WINDOW_SECONDS)
     );
 
     if (nextTarget <= currentTarget + 5) {
@@ -1842,6 +1941,7 @@
       }
 
       if (!isActiveSession(sessionId)) return [];
+      updateTranscriptWindows(startResponse.payload);
       const immediateSegments = normalizePreprocessSegments(startResponse.payload?.segments);
       if (maybeInstallExpandedSegments(immediateSegments)) {
         return true;
@@ -1864,10 +1964,13 @@
         }
 
         if (!isActiveSession(sessionId)) return [];
+        updateTranscriptWindows(statusResponse.payload);
         const segments = normalizePreprocessSegments(statusResponse.payload?.segments);
         if (maybeInstallExpandedSegments(segments)) {
           return true;
         }
+
+        if (statusResponse.payload?.status === 'done') return true;
 
         if (statusResponse.payload?.status === "failed") {
           console.warn("[YouTube Live Dub MVP] Transcript expansion failed.", statusResponse.payload);
@@ -1886,14 +1989,18 @@
       return false;
     }
 
-    const currentLastEnd = getLastSegmentEnd(state.sourceSegments);
-    const nextLastEnd = getLastSegmentEnd(segments);
-    if (nextLastEnd <= currentLastEnd + 2 || segments.length <= state.sourceSegments.length) {
-      return false;
-    }
-
-    state.sourceSegments = mergeTimedSegments(state.sourceSegments, segments, currentLastEnd);
-    state.chunks = chunkSegments(state.sourceSegments);
+    const merged = mergeTimedSegments(state.sourceSegments, segments);
+    if (merged.length === state.sourceSegments.length) return false;
+    const chunkKey = chunk => `${chunk.start}:${chunk.end}:${chunk.text}`;
+    const previousIndexes = new Map(state.chunks.map(chunk => [chunkKey(chunk), chunk.index]));
+    let nextIndex = Math.max(-1, ...state.chunks.map(chunk => chunk.index)) + 1;
+    state.sourceSegments = merged;
+    state.chunks = chunkSegments(merged).map(chunk => ({ ...chunk, index: previousIndexes.get(chunkKey(chunk)) ?? nextIndex++ }));
+    const validIndexes = new Set(state.chunks.map(chunk => chunk.index));
+    if (!validIndexes.has(state.currentChunkIndex)) stopCurrentAudio();
+    state.prepared = state.prepared.filter(item => validIndexes.has(item.chunkIndex));
+    state.preparedChunkIndexes = new Set(state.prepared.map(item => item.chunkIndex));
+    const nextLastEnd = getLastSegmentEnd(merged);
     state.transcriptTargetDuration = Math.max(state.transcriptTargetDuration, nextLastEnd);
     updateMeta(
       state.videoId,
@@ -2335,7 +2442,7 @@
     const safeTime = Number.isFinite(videoTime) ? videoTime : getVideoTime();
     const preparedEnd = getPreparedEndAfter(safeTime);
     const readyClipsAhead = state.prepared.filter((item) => {
-      return item.end >= safeTime - PREPARE_LEAD_SECONDS;
+      return item.end > safeTime && item.start < preparedEnd;
     }).length;
     return {
       preparedEnd,
@@ -2345,12 +2452,17 @@
   }
 
   function getPreparedEndAfter(videoTime) {
-    return state.prepared.reduce((max, item) => {
-      if (item.end >= videoTime - PREPARE_LEAD_SECONDS) {
-        return Math.max(max, item.end);
-      }
-      return max;
-    }, videoTime);
+    // A later cached block does not cover missing captions at the seek position.
+    // Walk caption order so natural gaps between spoken sentences remain valid.
+    let preparedEnd = videoTime;
+    const coverageEnd = state.transcriptWindows.length ? getKnownTranscriptEndAt(videoTime) : Infinity;
+    for (const chunk of state.chunks) {
+      if (chunk.end <= videoTime) continue;
+      if (chunk.start >= coverageEnd) break;
+      if (!state.preparedChunkIndexes.has(chunk.index)) break;
+      preparedEnd = Math.max(preparedEnd, Math.min(chunk.end, coverageEnd));
+    }
+    return preparedEnd;
   }
 
   function getLastSegmentEnd(segments) {
@@ -2840,6 +2952,9 @@
       item ? `구간: ${finite(item.start)}–${finite(item.end)}초` : "",
       item?.sourceText ? `원문: ${item.sourceText}` : "",
       item?.translatedText ? `번역: ${item.translatedText}` : "",
+      state.metrics ? `첫 더빙: ${state.metrics.firstAudioMs === null ? '준비 중' : (state.metrics.firstAudioMs / 1000).toFixed(2) + '초'} · 최근 준비: ${(state.metrics.lastPrepareMs / 1000).toFixed(2)}초` : "",
+      state.metrics ? `버퍼 대기: ${state.metrics.bufferWaits}회 · 문장 끝 보존: ${state.metrics.tailWaits}회 · 재생 클립: ${state.metrics.playedClips}` : "",
+      state.playbackHold ? (state.playbackHold.reason === 'tail' ? '문장을 끝까지 읽은 뒤 영상 재개' : '더빙 준비 후 영상과 함께 재개') : "",
     ].filter(Boolean).join("\n");
   }
 

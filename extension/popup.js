@@ -1,4 +1,4 @@
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 const YOUTUBE_WATCH_RE = /^https:\/\/(www\.)?youtube\.com\/watch\b|^https:\/\/youtube\.com\/watch\b/;
 
 const els = {};

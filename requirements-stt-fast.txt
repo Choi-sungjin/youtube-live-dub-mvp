@@ -1,0 +1,2 @@
+# Optional acceleration; the existing openai-whisper path remains a fallback.
+faster-whisper==1.2.1

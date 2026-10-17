@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YouTube Live Dub MVP",
   "description": "Developer-mode control panel for preparing and syncing dubbed audio on YouTube watch pages.",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "permissions": [
     "activeTab",
     "scripting",

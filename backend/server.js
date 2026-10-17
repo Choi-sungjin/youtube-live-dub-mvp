@@ -1,5 +1,7 @@
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
-import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus } from './supertonic-speech.js';
+import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus, closeSupertonic } from './supertonic-speech.js';
+import { createDiskTextCache } from './disk-text-cache.js';
+import { warmFastStt, fastSttStatus, transcribeFast, closeFastStt } from './fast-stt.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -25,6 +27,7 @@ const SUPERTONE_TTS_URL = 'https://supertoneapi.com/v1/text-to-speech';
 const MAX_TTS_CHARS = 300;
 const PREPROCESS_JOBS = new Map();
 const TRANSLATION_CACHE = new Map();
+const TRANSLATION_DISK_CACHE = createDiskTextCache(path.join(CACHE_DIR, 'translations'));
 const MAX_TRANSLATION_CACHE_ITEMS = 5000;
 const ZAI_RETRY_DELAYS_MS = [1500, 3500];
 const ZAI_RATE_LIMIT_COOLDOWN_MS = 60_000;
@@ -74,10 +77,11 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/api/health')) {
       json(res, 200, {
         ok: true,
-        version: '0.5.2',
+        version: '0.6.0',
         platform: process.platform,
         ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone'] : ['supertonic3', 'supertone'],
         supertonic: supertonicStatus(),
+        stt: fastSttStatus(),
         provider: providerInfo(),
         voices: Object.values(SUPERTONE_VOICES),
         port: PORT
@@ -157,6 +161,14 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`YouTube Live Dub backend listening at http://${HOST}:${PORT}`);
   if (activeTtsProvider() === 'supertonic3') warmSupertonic().catch(error => console.warn(error.message));
+  if (process.env.YLD_FAST_STT !== '0') warmFastStt().catch(error => console.warn(`Fast STT: ${error.message}`));
+});
+
+function closeWorkers() { closeFastStt(); closeSupertonic(); }
+server.on('close', closeWorkers);
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+  closeWorkers();
+  server.close(() => process.exit(0));
 });
 
 function providerInfo() {
@@ -191,6 +203,8 @@ function providerInfo() {
 }
 
 async function prepareDub(body) {
+  const requestStarted = performance.now();
+  const timings = {};
   const videoId = String(body?.videoId || '').trim();
   const settings = normalizeSettings(body?.settings);
   const inputSegments = Array.isArray(body?.segments) ? body.segments : [];
@@ -204,7 +218,10 @@ async function prepareDub(body) {
   }
 
   const limitedSegments = segments.slice(0, 80);
-  const translated = await translateSegments(limitedSegments, settings);
+  const translationStarted = performance.now();
+  const translated = await translateSegments(limitedSegments, settings, timings);
+  timings.translationMs = Math.round(performance.now() - translationStarted);
+  const speechStarted = performance.now();
   const ttsConcurrency = clamp(Number(process.env.LOCAL_TTS_CONCURRENCY || 3), 1, 6);
 
   const preparedItems = await mapLimit(limitedSegments, ttsConcurrency, async (segment) => {
@@ -267,9 +284,12 @@ async function prepareDub(body) {
 
   const hits = preparedItems.filter((result) => result.hit).length;
   const prepared = preparedItems.map((result) => result.item);
+  timings.speechMs = Math.round(performance.now() - speechStarted);
+  timings.totalMs = Math.round(performance.now() - requestStarted);
 
   return {
     videoId,
+    timings,
     provider: providerInfo(),
     requestProvider: {
       translation: activeTranslationProvider(),
@@ -392,6 +412,7 @@ async function readCachedSttCaptions(videoId) {
     source: 'local-stt-cache',
     generatedAt: payload?.generatedAt || '',
     language: payload?.language || '',
+    windows: Array.isArray(payload?.windows) ? payload.windows : [],
     segments
   };
 }
@@ -404,12 +425,13 @@ async function startCaptionPreprocess(body) {
 
   const force = Boolean(body?.force);
   const cached = force ? { segments: [] } : await readCachedSttCaptions(videoId);
-  if (cached.segments.length) {
+  if (cached.segments.length || cached.windows?.length) {
     return {
       ok: true,
       videoId,
       status: 'done',
       source: cached.source,
+      windows: cached.windows || [],
       segments: cached.segments
     };
   }
@@ -490,9 +512,18 @@ async function startCaptionPreprocess(body) {
       SUPERTONE_SPEED: String(body?.settings?.speed ?? process.env.SUPERTONE_SPEED ?? 1.29)
     },
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc']
   });
 
+  child.on('message', async message => {
+    if (message?.type !== 'YLD_STT_REQUEST') return;
+    try {
+      const result = await transcribeFast(message);
+      if (child.connected) child.send({ type: 'YLD_STT_RESULT', id: message.id, result });
+    } catch (error) {
+      if (child.connected) child.send({ type: 'YLD_STT_RESULT', id: message.id, error: error.message });
+    }
+  });
   child.stdout.on('data', (chunk) => appendPreprocessOutput(job, chunk));
   child.stderr.on('data', (chunk) => appendPreprocessOutput(job, chunk));
   child.on('error', (error) => {
@@ -505,8 +536,9 @@ async function startCaptionPreprocess(body) {
     job.finishedAt = new Date().toISOString();
     if (code === 0) {
       const cachedResult = await readCachedSttCaptions(videoId).catch(() => ({ segments: [] }));
-      job.status = cachedResult.segments.length ? 'done' : 'failed';
-      job.error = cachedResult.segments.length ? '' : 'Preprocess exited successfully, but no cached STT segments were found.';
+      const inspected = cachedResult.segments.length || cachedResult.windows?.length;
+      job.status = inspected ? 'done' : 'failed';
+      job.error = inspected ? '' : 'Preprocess exited successfully, but no cached STT coverage was found.';
     } else {
       job.status = 'failed';
       job.error = `Preprocess exited with code ${code}.`;
@@ -527,13 +559,14 @@ async function readPreprocessStatus(videoId) {
   }
 
   const cached = await readCachedSttCaptions(videoId);
-  if (cached.segments.length) {
+  if (cached.segments.length || cached.windows?.length) {
     return {
       ok: true,
       videoId,
       status: 'done',
       source: cached.source,
       generatedAt: cached.generatedAt,
+      windows: cached.windows || [],
       language: cached.language,
       segments: cached.segments
     };
@@ -623,13 +656,13 @@ function normalizeSegment(segment, fallbackIndex) {
   };
 }
 
-async function translateSegments(segments, settings) {
+async function translateSegments(segments, settings, metrics = {}) {
   const provider = activeTranslationProvider();
   const translated = new Map();
   const missing = [];
 
   for (const segment of segments) {
-    const cached = getCachedTranslation(segment, settings, provider);
+    const cached = await getCachedTranslation(segment, settings, provider);
     if (cached) {
       translated.set(segment.index, cached);
     } else {
@@ -637,6 +670,7 @@ async function translateSegments(segments, settings) {
     }
   }
 
+  metrics.translationCacheHits = segments.length - missing.length;
   if (!missing.length) {
     return translated;
   }
@@ -666,7 +700,7 @@ async function translateSegments(segments, settings) {
     const providerText = providerTranslations.get(segment.index);
     if (providerText) {
       translated.set(segment.index, providerText);
-      setCachedTranslation(segment, settings, provider, providerText);
+      await setCachedTranslation(segment, settings, provider, providerText);
     } else {
       throw httpError(502, `Translation provider omitted segment ${segment.index}; no substitute text was generated.`);
     }
@@ -917,11 +951,20 @@ function translateMock(text, settings) {
   return `${tonePrefix}${normalized}`;
 }
 
-function getCachedTranslation(segment, settings, provider) {
-  return TRANSLATION_CACHE.get(translationCacheKey(segment, settings, provider)) || '';
+async function getCachedTranslation(segment, settings, provider) {
+  const key = translationCacheKey(segment, settings, provider);
+  const cached = TRANSLATION_CACHE.get(key) || await TRANSLATION_DISK_CACHE.get(key);
+  if (cached) rememberTranslation(key, cached);
+  return cached;
 }
 
-function setCachedTranslation(segment, settings, provider, text) {
+async function setCachedTranslation(segment, settings, provider, text) {
+  const key = translationCacheKey(segment, settings, provider);
+  rememberTranslation(key, text);
+  await TRANSLATION_DISK_CACHE.set(key, text);
+}
+
+function rememberTranslation(key, text) {
   if (!text) {
     return;
   }
@@ -931,11 +974,12 @@ function setCachedTranslation(segment, settings, provider, text) {
       TRANSLATION_CACHE.delete(oldestKey);
     }
   }
-  TRANSLATION_CACHE.set(translationCacheKey(segment, settings, provider), text);
+  TRANSLATION_CACHE.set(key, text);
 }
 
 function translationCacheKey(segment, settings, provider) {
   return hashValue({
+    schemaVersion: 1,
     provider,
     model: provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || 'gpt-5.2',
     targetLang: settings.targetLang,
