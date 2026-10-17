@@ -9,8 +9,8 @@ and a Node.js backend that prepares Korean dubbing for YouTube videos.
   no external npm dependencies. No npm install, Python model download, or API key
   is needed for the standard cloud development checks.
 - Run `npm run test:cloud` before changing code and after relevant changes.
-  It checks JavaScript syntax/version consistency, seven existing regression
-  cases, and a mock translation/WAV contract. It uses loopback networking only.
+  It checks JavaScript syntax/version consistency, regression cases, and a mock
+  translation/WAV contract. The test code uses loopback networking only.
 - `.claude/settings.json` runs a lightweight SessionStart hook in cloud sessions.
 - Follow `docs/claude-cloud.md` for cloud/local verification boundaries.
 
@@ -20,6 +20,9 @@ and a Node.js backend that prepares Korean dubbing for YouTube videos.
   playback scheduling against the YouTube video clock.
 - `backend/server.js`: local HTTP API and diagnostics UI; default 127.0.0.1:18789.
 - `backend/windows-speech.*`: Windows SAPI speech implementation.
+- `backend/supertonic-speech.js`, `backend/supertonic-worker.py`: optional local
+  Supertonic 3 worker. Real synthesis needs Python, `requirements-supertonic.txt`,
+  and installed model files; standard cloud checks do not install or run them.
 - `native-host/`: Chrome native messaging and Windows installer scripts.
 - `lib/dub-core.js`, `api/`: shared/serverless translation and TTS path.
 - `scripts/`: checks, preprocessing and local verification tools.

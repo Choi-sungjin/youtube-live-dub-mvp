@@ -1,4 +1,5 @@
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
+import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus } from './supertonic-speech.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -73,9 +74,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/api/health')) {
       json(res, 200, {
         ok: true,
-        version: '0.5.0',
+        version: '0.5.2',
         platform: process.platform,
-        ttsProviders: process.platform === 'win32' ? ['windows-sapi', 'supertone'] : ['supertone'],
+        ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone'] : ['supertonic3', 'supertone'],
+        supertonic: supertonicStatus(),
         provider: providerInfo(),
         voices: Object.values(SUPERTONE_VOICES),
         port: PORT
@@ -100,7 +102,9 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/api/captions') {
       const videoId = String(url.searchParams.get('videoId') || '').trim();
-      const result = await fetchCaptionsWithLocalFallback(videoId);
+      const result = url.searchParams.get('cacheOnly') === '1'
+        ? await readCachedSttCaptions(videoId)
+        : await fetchCaptionsWithLocalFallback(videoId);
       json(res, 200, result);
       return;
     }
@@ -152,6 +156,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`YouTube Live Dub backend listening at http://${HOST}:${PORT}`);
+  if (activeTtsProvider() === 'supertonic3') warmSupertonic().catch(error => console.warn(error.message));
 });
 
 function providerInfo() {
@@ -161,9 +166,9 @@ function providerInfo() {
     'zai'
   );
   const ttsProvider = normalizeProvider(
-    process.env.TTS_PROVIDER || 'supertone',
-    ['supertone', 'windows-sapi', 'mock-wav'],
-    'supertone'
+    process.env.TTS_PROVIDER || 'supertonic3',
+    ['supertonic3', 'supertone', 'windows-sapi', 'mock-wav'],
+    'supertonic3'
   );
 
   return {
@@ -222,7 +227,8 @@ async function prepareDub(body) {
     const exists = await fileExists(audioPath);
     const sourceDuration = Math.max(0.55, Math.min(12, segment.end - segment.start));
     let audioDuration = sourceDuration;
-    let actualTtsModel = settings.ttsProvider === 'windows-sapi' ? 'windows-sapi' : settings.ttsModel;
+    let actualTtsModel = settings.ttsModel;
+    let synthesisMs = 0;
     if (exists) audioDuration = wavDuration(await readFile(audioPath));
 
     if (!exists) {
@@ -234,6 +240,7 @@ async function prepareDub(body) {
       });
       audioDuration = result.duration || audioDuration;
       actualTtsModel = result.ttsModel || actualTtsModel;
+      synthesisMs = result.synthesisMs || 0;
     }
 
     return {
@@ -250,6 +257,8 @@ async function prepareDub(body) {
         audioUrl: `http://${HOST}:${PORT}/audio/${id}.wav`,
         duration: roundTime(audioDuration),
         durationMs: Math.round(audioDuration * 1000),
+        synthesisMs,
+        speechSpeed: settings.speed,
         voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : settings.voice,
         ttsModel: actualTtsModel
       }
@@ -284,6 +293,7 @@ async function fetchYouTubeCaptions(videoId) {
 
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`;
   const watchResponse = await fetch(watchUrl, {
+    signal: AbortSignal.timeout(8000),
     headers: {
       'Accept-Language': 'en-US,en;q=0.9',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36'
@@ -312,6 +322,7 @@ async function fetchYouTubeCaptions(videoId) {
   const captionUrl = new URL(track.baseUrl);
   captionUrl.searchParams.set('fmt', 'json3');
   const captionResponse = await fetch(captionUrl.toString(), {
+    signal: AbortSignal.timeout(8000),
     headers: {
       'Accept-Language': 'en-US,en;q=0.9',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36'
@@ -472,7 +483,7 @@ async function startCaptionPreprocess(body) {
     env: {
       ...process.env,
       SUPERTONE_DEFAULT_VOICE_ID: String(body?.settings?.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id),
-      TTS_PROVIDER: String(body?.settings?.ttsProvider || process.env.TTS_PROVIDER || 'supertone'),
+      TTS_PROVIDER: activeTtsProvider(body?.settings),
       SUPERTONE_MODEL: String(body?.settings?.ttsModel || process.env.SUPERTONE_MODEL || 'sona_speech_2_flash'),
       SUPERTONE_PITCH_SHIFT: String(body?.settings?.pitchShift ?? process.env.SUPERTONE_PITCH_SHIFT ?? 0),
       SUPERTONE_PITCH_VARIANCE: String(body?.settings?.pitchVariance ?? process.env.SUPERTONE_PITCH_VARIANCE ?? 1.5),
@@ -574,20 +585,20 @@ function normalizeYouTubeUrl(input, videoId) {
 }
 
 function normalizeSettings(settings = {}) {
-  const voice = String(settings.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id);
+  const ttsProvider = normalizeProvider(settings.ttsProvider || process.env.TTS_PROVIDER || 'supertonic3',
+    ['supertonic3', 'supertone', 'windows-sapi', 'mock-wav'], 'supertonic3');
+  const voice = ttsProvider === 'supertonic3'
+    ? (/^[MF][1-5]$/.test(settings.voice) ? settings.voice : 'M1')
+    : String(settings.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id);
   return {
     voice,
     tone: String(settings.tone || process.env.SUPERTONE_STYLE || 'neutral'),
     pitchShift: clamp(Number(settings.pitchShift ?? process.env.SUPERTONE_PITCH_SHIFT ?? 0), -24, 24),
     pitchVariance: clamp(Number(settings.pitchVariance ?? process.env.SUPERTONE_PITCH_VARIANCE ?? 1.5), 0, 2),
-    speed: clamp(Number(settings.speed ?? process.env.SUPERTONE_SPEED ?? 1.29), 0.5, 2),
+    speed: ttsProvider === 'supertonic3' ? 1.15 : clamp(Number(settings.speed ?? process.env.SUPERTONE_SPEED ?? 1.29), 0.5, 2),
     targetLang: String(settings.targetLang || 'ko'),
-    ttsModel: String(settings.ttsModel || process.env.SUPERTONE_MODEL || 'sona_speech_2_flash'),
-    ttsProvider: normalizeProvider(
-      settings.ttsProvider || process.env.TTS_PROVIDER || 'supertone',
-      ['supertone', 'windows-sapi', 'mock-wav'],
-      'supertone'
-    )
+    ttsModel: ttsProvider === 'supertonic3' ? 'supertonic-3' : ttsProvider === 'windows-sapi' ? 'windows-sapi' : String(settings.ttsModel || process.env.SUPERTONE_MODEL || 'sona_speech_2_flash'),
+    ttsProvider
   };
 }
 
@@ -831,6 +842,7 @@ async function translateSegmentsWithOpenAI(segments, settings) {
 }
 
 async function synthesizeSpeech({ text, duration, settings, outputPath }) {
+  if (settings.ttsProvider === 'supertonic3') return synthesizeSupertonicSpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'windows-sapi') return synthesizeWindowsSpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'supertone' && !process.env.SUPERTONE_API_KEY) {
     throw httpError(503, 'Supertone API key is not configured. Select an available speech provider.');
@@ -1080,7 +1092,7 @@ function activeTranslationProvider() {
 }
 
 function activeTtsProvider(settings) {
-  return normalizeProvider(settings?.ttsProvider || process.env.TTS_PROVIDER || 'supertone', ['supertone', 'windows-sapi', 'mock-wav'], 'supertone');
+  return normalizeProvider(settings?.ttsProvider || process.env.TTS_PROVIDER || 'supertonic3', ['supertonic3', 'supertone', 'windows-sapi', 'mock-wav'], 'supertonic3');
 }
 
 function buildWarnings() {
@@ -1091,7 +1103,7 @@ function buildWarnings() {
   if (activeTranslationProvider() === 'openai' && !process.env.OPENAI_API_KEY) {
     warnings.push('OPENAI_API_KEY is not configured; translation requests will fail.');
   }
-  if (normalizeProvider(process.env.TTS_PROVIDER || 'supertone', ['supertone', 'windows-sapi', 'mock-wav'], 'supertone') === 'supertone' && !process.env.SUPERTONE_API_KEY) {
+  if (activeTtsProvider() === 'supertone' && !process.env.SUPERTONE_API_KEY) {
     warnings.push('SUPERTONE_API_KEY is not configured; Supertone requests will fail.');
   }
   return warnings;

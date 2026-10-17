@@ -179,7 +179,7 @@ function arrayBufferToBase64(buffer) {
 async function fetchCaptions(payload) {
   const backendUrl = normalizeBackendUrl(payload && payload.backendUrl);
   const videoId = encodeURIComponent(String(payload?.videoId || ""));
-  const response = await fetch(`${backendUrl}/api/captions?videoId=${videoId}`, {
+  const response = await fetch(`${backendUrl}/api/captions?videoId=${videoId}${payload?.cacheOnly ? "&cacheOnly=1" : ""}`, {
     method: "GET",
     signal: AbortSignal.timeout(30000),
   });

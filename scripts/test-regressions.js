@@ -64,9 +64,9 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
 async function contentFixture(overrides = {}) {
   const source = await readFile('extension/content.js', 'utf8');
   const video = { currentTime: 0, volume: 0.8, muted: false, paused: false, ended: false, playbackRate: 1, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } };
-  const context = vm.createContext({ window: {}, console: { error() {}, warn() {} }, URL, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
+  const context = vm.createContext({ window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
   const injection = `
-    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, syncAudioToVideo };
+    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, syncAudioToVideo, collectCaptionSegments, collectCaptionTracksWithBudget };
     state.videoId = 'abcdefghijk'; state.video = video;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
     els.volume.value='35'; els.ttsProvider.value='windows-sapi';
@@ -78,10 +78,12 @@ async function contentFixture(overrides = {}) {
     maybePrepareMoreAudio=()=>{};
     requestDubPrepare=overrides.prepare || (async()=>({segments:[]}));
     bufferPreparedAudio=async()=>{};
+    buildCaptionUrls=url=>[{url,format:'json3'}]; buildYouTubeClientHeaders=()=>({});
+    if (overrides.backendCaptions) fetchBackendCaptionSegments=overrides.backendCaptions;
     if (overrides.chunks) chunkSegments=()=>overrides.chunks;
     return;
   `;
-  vm.runInContext(source.replace('  init();', injection), context);
+  vm.runInContext(source.replace('  init();', injection).replace('const CAPTION_FETCH_BUDGET_MS = 12000;', 'const CAPTION_FETCH_BUDGET_MS = 30;'), context);
   return { ...context.fixture, video };
 }
 
@@ -91,6 +93,42 @@ test('Stop during caption collection does not start audio preparation', async ()
   const run = f.startDub(); await new Promise(r => setTimeout(r, 0)); f.stopDub();
   captions.resolve([{ start: 0, end: 4, text: 'Late caption' }]); await run;
   assert.equal(requests, 0); assert.equal(f.state.running, false); assert.equal(f.state.status, 'stopped'); assert.equal(f.video.volume, 0.8);
+});
+
+function stalledCaptionFetch(counter) {
+  return (_url, { signal }) => new Promise((_resolve, reject) => {
+    counter.requests++;
+    signal.addEventListener('abort', () => { counter.aborted++; reject(new Error('aborted')); }, { once: true });
+  });
+}
+
+test('caption collection leaves stalled requests when its shared budget expires', async () => {
+  const counter = { requests: 0, aborted: 0 };
+  const f = await contentFixture({ fetch: stalledCaptionFetch(counter) });
+  f.state.running = true; f.state.sessionId = 1;
+  const result = await f.collectCaptionTracksWithBudget([{baseUrl:'https://example.invalid/caption',languageCode:'en'}], 'abcdefghijk', 1);
+  assert.equal(result.length, 0); assert.equal(counter.requests, 1); assert.equal(counter.aborted, 1);
+  assert.equal(f.state.captionAbortController, null);
+});
+
+test('Stop aborts a live caption request and does not try another track', async () => {
+  const counter = { requests: 0, aborted: 0 };
+  const f = await contentFixture({ fetch: stalledCaptionFetch(counter) });
+  f.state.running = true; f.state.sessionId = 1;
+  const pending = f.collectCaptionTracksWithBudget([{baseUrl:'https://example.invalid/one'},{baseUrl:'https://example.invalid/two'}], 'abcdefghijk', 1);
+  f.stopDub(); await pending;
+  assert.equal(counter.aborted, 1); assert.equal(counter.requests, 1); assert.equal(f.state.running, false);
+});
+
+test('usable cached captions bypass slow remote caption lookup', async () => {
+  let cacheOnly = false;
+  const f = await contentFixture({ backendCaptions: async (_id, options) => {
+    cacheOnly = options.cacheOnly;
+    return [{start:0,end:12,text:'Cached original speech'}];
+  } });
+  f.state.running = true;
+  const result = await f.collectCaptionSegments('abcdefghijk');
+  assert.equal(cacheOnly, true); assert.equal(result[0].text, 'Cached original speech');
 });
 
 test('late audio from an old session cannot change the new session', async () => {
@@ -127,4 +165,29 @@ test('audio follows video pause, seek and playback rate', async () => {
   f.video.paused = false; f.video.currentTime = 12; f.video.playbackRate = 1.5;
   f.syncAudioToVideo(); assert.equal(audio.currentTime, 2); assert.equal(audio.playbackRate, 1.5); assert.equal(audio.paused, false);
   f.video.currentTime = 20; f.syncAudioToVideo(); assert.equal(audio.paused, true); assert.equal(f.state.currentAudio, null);
+});
+
+test('Supertonic files keep their baked-in 1.15x speed without adaptive stretching', async () => {
+  const f = await contentFixture();
+  const audio = { duration: 4, currentTime: 0, paused: true, playbackRate: 1, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } };
+  f.state.running = true;
+  f.state.chunks = [{index:0,start:10,end:18}];
+  f.state.prepared = [{chunkIndex:0,start:10,end:18,ttsModel:'supertonic-3',speechSpeed:1.15,audio}];
+  f.video.currentTime = 11; f.syncAudioToVideo();
+  assert.equal(audio.playbackRate, 1); assert.equal(audio.currentTime, 1); assert.equal(audio.paused, false);
+  f.video.currentTime = 15; f.syncAudioToVideo();
+  assert.equal(audio.paused, true); assert.equal(f.state.currentAudio, null);
+  f.video.currentTime = 11.5; f.syncAudioToVideo();
+  assert.equal(audio.currentTime, 1.5); assert.equal(audio.paused, false);
+});
+
+test('a short completed voice is not repeatedly replayed at the end of its caption', async () => {
+  const f = await contentFixture(); let plays = 0;
+  const audio = { duration: 2, currentTime: 0, paused: true, playbackRate: 1, pause() { this.paused = true; }, play() { plays++; this.paused = false; return Promise.resolve(); } };
+  f.state.running = true; f.state.chunks = [{index:0,start:0,end:10}];
+  f.state.prepared = [{chunkIndex:0,start:0,end:10,audio}];
+  f.video.currentTime = 0.2; f.syncAudioToVideo(); assert.equal(plays, 1);
+  f.video.currentTime = 4; f.syncAudioToVideo();
+  f.video.currentTime = 5; f.syncAudioToVideo();
+  assert.equal(plays, 1); assert.equal(audio.paused, true);
 });

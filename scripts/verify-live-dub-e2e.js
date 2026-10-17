@@ -11,7 +11,7 @@ if (!videoId) {
 }
 
 const settings = {
-  ttsProvider: options.ttsProvider || 'supertone',
+  ttsProvider: options.ttsProvider || 'supertonic3',
   voice: options.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || '763d5f200a9f5808056733',
   tone: 'neutral',
   targetLang: options.targetLang || 'ko',
@@ -44,6 +44,7 @@ async function checkHealth() {
   assert(body.provider?.zaiConfigured, 'Z.ai is not configured.');
   if (settings.ttsProvider === 'supertone') assert(body.provider?.supertoneConfigured, 'Supertone is not configured.');
   if (settings.ttsProvider === 'windows-sapi') assert(body.ttsProviders?.includes('windows-sapi'), 'Windows speech is unavailable.');
+  if (settings.ttsProvider === 'supertonic3') assert(body.ttsProviders?.includes('supertonic3'), 'Supertonic 3 is unavailable.');
   addCheck('health', {
     provider: {
       translation: body.provider.translation,

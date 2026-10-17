@@ -24,10 +24,14 @@ Windows PC에서 실제 더빙과 Chrome 연동을 검증하도록 준비했습�
 npm run test:cloud
 ```
 
-JavaScript 문법/버전 검사, 기존 7개 회귀 테스트, 모의 번역/WAV 생성
+JavaScript 문법/버전 검사, 회귀 테스트, 모의 번역/WAV 생성
 검사를 순서대로 실행합니다. API 키를 빈 값으로 덮어써 로컬 환경 파일의
 키를 사용하지 않습니다. 외부 유료 API와 YouTube 다운로드를 사용하지
 않으며, native messaging 회귀 테스트는 임시 loopback 서버를 사용합니다.
+
+Supertonic 3 소스가 포함되어 있어도 기본 클라우드 검사는 Python 음성 모델을
+실행하지 않습니다. 실제 합성은 Python, `requirements-supertonic.txt`의 패키지,
+설치된 모델 파일이 있는 로컬 환경에서 따로 검증합니다.
 
 ## Windows에서 최종 확인
 
@@ -43,7 +47,8 @@ JavaScript 문법/버전 검사, 기존 7개 회귀 테스트, 모의 번역/WAV
 
 ## 저장소에서 제외한 파일
 
-`.env*`, `.venv*`, `backend/.cache/`, `.vercel/`, 로컬 검증 캡처/로그 폴더,
+실제 `.env*` 파일(`.env.example` 템플릿 제외), `.venv*`, `backend/.cache/`,
+`__pycache__/`, `.vercel/`, 로컬 검증 캡처/로그 폴더,
 설치 시 생성되는 `native-host/com.youtube_live_dub.backend.json`은 업로드하지
 않습니다. 로컬 파일은 보존합니다. 로컬 검증 기록 링크는 클라우드 복제본에
 없을 수 있습니다. 새 PC의 native-host manifest는 설치 스크립트가 생성합니다.

@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.5.0";
+  const BUILD_VERSION = "0.5.2";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -18,6 +18,7 @@
   const MIN_START_BUFFER_SECONDS = 8;
   const MIN_START_BUFFER_CLIPS = 2;
   const TEXT_TRACK_WAIT_MS = 4500;
+  const CAPTION_FETCH_BUDGET_MS = 12000;
   const PAGE_CAPTION_PRIME_WAIT_MS = 7500;
   const PREPROCESS_WAIT_MS = 8 * 60 * 1000;
   const PREPROCESS_POLL_MS = 5000;
@@ -35,6 +36,7 @@
   const state = {
     running: false,
     sessionId: 0,
+    captionAbortController: null,
     status: "idle",
     lastError: "",
     videoId: "",
@@ -152,6 +154,7 @@
         <div class="yld-row">
           <label class="yld-label" for="yld-tts-provider">음성 엔진</label>
           <select id="yld-tts-provider" class="yld-panel-select" data-yld-tts-provider>
+            <option value="supertonic3">Supertonic 3 · 로컬 음성 · 1.15배</option>
             <option value="windows-sapi">Windows 로컬 음성 (설치된 한국어 음성)</option>
             <option value="supertone">Supertone API</option>
           </select>
@@ -188,6 +191,10 @@
           <div><strong>Audio:</strong> none</div>
           <div class="yld-error" data-yld-error hidden></div>
         </div>
+        <details class="yld-diagnostics">
+          <summary>재생 진단</summary>
+          <pre data-yld-diagnostics></pre>
+        </details>
       </div>
     `;
 
@@ -217,6 +224,7 @@
     els.speed = panel.querySelector("[data-yld-speed]");
     els.meta = panel.querySelector("[data-yld-meta]");
     els.error = panel.querySelector("[data-yld-error]");
+    els.diagnostics = panel.querySelector("[data-yld-diagnostics]");
   }
 
   function bindPanelEvents() {
@@ -225,9 +233,21 @@
       return;
     }
     els.panel.dataset.yldBound = "1";
+    const cloudVoices = els.voice.innerHTML;
+    const savedVoices = { supertonic3: "M1", supertone: els.voice.value };
+    let previousSpeechProvider = "supertone";
     const updateSpeechControls = () => {
-      const local = els.ttsProvider.value === "windows-sapi";
-      [els.voice, els.model, els.pitch, els.variance].forEach(control => { control.disabled = local; });
+      const provider = els.ttsProvider.value;
+      savedVoices[previousSpeechProvider] = els.voice.value;
+      els.voice.innerHTML = provider === "supertonic3"
+        ? ["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"].map(voice => `<option value="${voice}">${voice} · ${voice[0] === "M" ? "남성" : "여성"}</option>`).join("")
+        : cloudVoices;
+      els.voice.value = savedVoices[provider] || savedVoices.supertone;
+      previousSpeechProvider = provider;
+      els.voice.disabled = provider === "windows-sapi";
+      [els.model, els.pitch, els.variance].forEach(control => { control.disabled = provider !== "supertone"; });
+      els.speed.disabled = provider === "supertonic3";
+      if (provider === "supertonic3") els.speed.value = "1.15";
     };
     els.ttsProvider.addEventListener("change", updateSpeechControls);
     updateSpeechControls();
@@ -460,6 +480,8 @@
   function stopDub(options = {}) {
     const shouldResume = options.resumeVideo !== false && state.resumeVideoAfterPrepare;
     state.sessionId += 1;
+    state.captionAbortController?.abort();
+    state.captionAbortController = null;
     state.running = false;
     els.start.disabled = false;
     els.stop.disabled = true;
@@ -503,6 +525,7 @@
       setStatus("stopped");
       updateMeta(state.videoId || "unknown", "not loaded", "none");
     }
+    renderPlaybackDiagnostics();
   }
 
   function beginSyncLoop() {
@@ -515,7 +538,10 @@
 
     syncAudioToVideo();
     maybePrepareMoreAudio(getVideoTime(), "start");
-    state.syncTimer = setInterval(syncAudioToVideo, 160);
+    state.syncTimer = setInterval(() => {
+      syncAudioToVideo();
+      renderPlaybackDiagnostics();
+    }, 160);
     state.bufferTimer = setInterval(() => {
       maybePrepareMoreAudio(getVideoTime(), "timer");
     }, BUFFER_CHECK_INTERVAL_MS);
@@ -555,8 +581,14 @@
     const item = state.prepared[chunkIndex];
     const audioDuration = item.audio?.duration || item.duration || Math.max(0, item.end - item.start);
     const segmentDuration = Math.max(0.35, item.end - item.start);
-    const syncRate = clampPlaybackRate(audioDuration / segmentDuration);
-    const offset = Math.max(0, Math.min(audioDuration - 0.05, (videoTime - item.start) * syncRate));
+    // Supertonic files already contain the requested 1.15x speech. Do not retime them again.
+    const syncRate = item.ttsModel === "supertonic-3" ? 1 : clampPlaybackRate(audioDuration / segmentDuration);
+    const elapsed = Math.max(0, (videoTime - item.start) * syncRate);
+    if (elapsed >= audioDuration) {
+      stopCurrentAudio();
+      return;
+    }
+    const offset = elapsed;
 
     if (item.chunkIndex !== state.currentChunkIndex) {
       stopCurrentAudio();
@@ -872,6 +904,9 @@
 
   async function collectCaptionSegments(videoId) {
     const sessionId = state.sessionId;
+    const cached = await fetchBackendCaptionSegments(videoId, { cacheOnly: true });
+    if (!isActiveSession(sessionId)) return [];
+    if (segmentsCoverPlaybackStart(cached, getVideoTime())) return cached;
     let playerResponse = findPlayerResponse(videoId) || null;
     let tracks = getPlayerCaptionTracks(playerResponse);
 
@@ -890,13 +925,9 @@
       : "No YouTube caption tracks were found";
 
     if (tracks.length) {
-      for (const track of prioritizeCaptionTracks(tracks)) {
-        const parsed = await fetchCaptionTrackSegments(track, videoId);
+      const parsed = await collectCaptionTracksWithBudget(tracks, videoId, sessionId);
       if (!isActiveSession(sessionId)) return [];
-        if (parsed.length) {
-          return parsed;
-        }
-      }
+      if (parsed.length) return parsed;
     }
 
     const primedSegments = await requestPageCaptionPrime(videoId);
@@ -1370,6 +1401,7 @@
 
       const response = await fetch(`https://www.youtube.com/youtubei/v1/get_transcript?key=${encodeURIComponent(config.INNERTUBE_API_KEY)}`, {
         method: "POST",
+        signal: AbortSignal.timeout(6000),
         credentials: "include",
         headers,
         body: JSON.stringify({
@@ -1570,13 +1602,14 @@
     return lastEnd >= safeTime + MIN_START_BUFFER_SECONDS;
   }
 
-  async function fetchBackendCaptionSegments(videoId) {
+  async function fetchBackendCaptionSegments(videoId, options = {}) {
     try {
       const response = await chrome.runtime.sendMessage({
         type: "YLD_FETCH_CAPTIONS",
         payload: {
           backendUrl: els.backend.value,
           videoId,
+          cacheOnly: Boolean(options.cacheOnly),
         },
       });
 
@@ -1944,12 +1977,32 @@
     return track?.name?.simpleText || track?.name?.runs?.map((run) => run.text || "").join("") || "";
   }
 
-  async function fetchCaptionTrackSegments(track, videoId) {
+  async function collectCaptionTracksWithBudget(tracks, videoId, sessionId) {
+    const controller = new AbortController();
+    state.captionAbortController = controller;
+    const timer = setTimeout(() => controller.abort(), CAPTION_FETCH_BUDGET_MS);
+    try {
+      for (const track of prioritizeCaptionTracks(tracks).slice(0, 3)) {
+        if (!isActiveSession(sessionId) || controller.signal.aborted) break;
+        const parsed = await fetchCaptionTrackSegments(track, videoId, controller.signal);
+        if (!isActiveSession(sessionId)) return [];
+        if (parsed.length) return parsed;
+      }
+      return [];
+    } finally {
+      clearTimeout(timer);
+      if (state.captionAbortController === controller) state.captionAbortController = null;
+    }
+  }
+
+  async function fetchCaptionTrackSegments(track, videoId, signal) {
     const urls = buildCaptionUrls(track.baseUrl, videoId);
 
     for (const item of urls) {
+      if (signal?.aborted) return [];
       try {
         const response = await fetch(item.url, {
+          signal,
           credentials: "include",
           headers: buildYouTubeClientHeaders(),
         });
@@ -1965,6 +2018,7 @@
           return parsed;
         }
       } catch (error) {
+        if (signal?.aborted) return [];
         console.warn("[YouTube Live Dub MVP] Timedtext format failed.", item.format, error);
       }
     }
@@ -2358,6 +2412,10 @@
           audioDataUrl,
           contentType: item.contentType || item.content_type || "",
           bytes: Number(item.bytes || 0),
+          sourceText: item.sourceText || sourceChunk.text || "",
+          translatedText: item.translatedText || "",
+          ttsModel: item.ttsModel || "",
+          speechSpeed: Number(item.speechSpeed || 1),
           audio: null,
         };
       })
@@ -2587,9 +2645,10 @@
     state.videoId = getVideoId();
     state.video = document.querySelector("video.html5-main-video") || document.querySelector("video");
 
-    if (!state.running) {
+    if (!state.running && ["idle", "stopped"].includes(state.status)) {
       updateMeta(state.videoId || "unknown", "not loaded", "none");
     }
+    renderPlaybackDiagnostics();
   }
 
   function demoSegmentsFor(videoId) {
@@ -2763,6 +2822,25 @@
       }
     `;
     renderAlert();
+  }
+
+  function renderPlaybackDiagnostics() {
+    if (!els.diagnostics) return;
+    const video = state.video;
+    const audio = state.currentAudio || state.testAudio;
+    const item = state.prepared.find(entry => entry.audio === audio);
+    const finite = value => Number.isFinite(value) ? value.toFixed(2) : "—";
+    const mode = media => !media ? "없음" : media.error ? "오류" : media.ended ? "완료" : media.paused ? "일시정지" : "재생 중";
+    els.diagnostics.textContent = [
+      `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
+      `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
+      `더빙: ${finite(audio?.currentTime)} / ${finite(audio?.duration)}초 · ${mode(audio)}`,
+      `재생 속도: ${finite(audio?.playbackRate)}배 · 클립 ${item ? item.chunkIndex + 1 : "—"}`,
+      item?.ttsModel ? `음성 엔진: ${item.ttsModel} · 생성 속도 ${finite(item.speechSpeed)}배` : "",
+      item ? `구간: ${finite(item.start)}–${finite(item.end)}초` : "",
+      item?.sourceText ? `원문: ${item.sourceText}` : "",
+      item?.translatedText ? `번역: ${item.translatedText}` : "",
+    ].filter(Boolean).join("\n");
   }
 
   function renderAlert() {
