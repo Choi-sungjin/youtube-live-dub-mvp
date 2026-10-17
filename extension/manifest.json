@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Live Dub MVP",
+  "description": "Developer-mode control panel for preparing and syncing dubbed audio on YouTube watch pages.",
+  "version": "0.5.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://youtube.com/*",
+    "https://*.vercel.app/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Live Dub MVP",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/watch*",
+        "https://youtube.com/watch*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-probe.js"],
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*"
+      ]
+    }
+  ]
+}

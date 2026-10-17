@@ -1,0 +1,18 @@
+.vercel
+.env*.local
+
+# Credentials and local runtime data must never enter the cloud checkout.
+.env
+.env.*
+!.env.example
+node_modules/
+*.log
+*.pem
+*.key
+.claude/settings.local.json
+native-host/com.youtube_live_dub.backend.json
+docs/verification-*/
+
+.venv/
+.venv-win/
+backend/.cache/

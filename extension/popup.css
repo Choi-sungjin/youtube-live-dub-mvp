@@ -1,0 +1,103 @@
+body {
+  width: 280px;
+  margin: 0;
+  background: #15171c;
+  color: #f4f7fb;
+  font: 12px/1.4 Arial, Helvetica, sans-serif;
+}
+
+button,
+* {
+  box-sizing: border-box;
+}
+
+.popup {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 14px;
+}
+
+p {
+  color: #9bd5ff;
+  font-weight: 700;
+}
+
+.status-chip {
+  min-width: 74px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #20242d;
+  color: #9bd5ff;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-chip.error {
+  background: #4b2024;
+  color: #ffd8d8;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.actions button:first-child {
+  grid-column: span 2;
+}
+
+button {
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: #20242d;
+  color: #f4f7fb;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+button:hover {
+  background: #2b313c;
+}
+
+button.primary {
+  border-color: #2f8cff;
+  background: #1769d1;
+}
+
+button.primary:hover {
+  background: #247be8;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.details {
+  min-height: 56px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #cdd6e1;
+  overflow-wrap: anywhere;
+}

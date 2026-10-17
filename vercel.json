@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "api/captions.js": {
+      "maxDuration": 30
+    },
+    "api/captions/diagnose.js": {
+      "maxDuration": 30
+    },
+    "api/dub/prepare.js": {
+      "maxDuration": 60
+    }
+  }
+}

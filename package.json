@@ -1,0 +1,20 @@
+{
+  "name": "youtube-live-dub-mvp",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.js",
+    "dev": "vercel dev",
+    "test:prepare": "node scripts/test-vercel-core.js",
+    "test:captions": "node scripts/diagnose-captions.js",
+    "backend:start": "node backend/server.js",
+    "dub:preprocess": "node scripts/preprocess-dub.js",
+    "verify:e2e": "node scripts/verify-live-dub-e2e.js",
+    "test:regressions": "node --test scripts/test-regressions.js",
+    "test:cloud": "node scripts/test-cloud.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

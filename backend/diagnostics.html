@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live Dub · 로컬 진단</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#182238;font:16px/1.6 system-ui,sans-serif}main{max-width:820px;margin:48px auto;padding:24px}h1{font-size:32px;margin:8px 0}h2{font-size:19px}p{color:#526078}.eyebrow{color:#4364c4;font-weight:700;letter-spacing:.1em}section{background:white;padding:24px;border:1px solid #dce2ec;border-radius:16px;margin-top:20px}label{display:block;font-weight:600;margin:16px 0 6px}textarea,select{width:100%;padding:12px;border:1px solid #bdc7d8;border-radius:8px;font:inherit}button{background:#315cd1;color:white;border:0;border-radius:8px;padding:12px 18px;font:inherit;font-weight:600;cursor:pointer;margin-top:18px}button:disabled{opacity:.55}audio{width:100%;margin-top:16px}output{white-space:pre-wrap;display:block;margin-top:12px}#translation{font-size:22px;color:#172b62}.muted{font-size:14px}.error{color:#b42318}#status{font-weight:700}a{color:#315cd1}
+</style>
+<main><div class="eyebrow">LIVE DUB / v0.5.0</div><h1>번역과 음성 연결 확인</h1>
+<p>로컬 서버에서 실제 번역과 음성을 확인합니다. 유튜브 확장 프로그램의 자막 수집·재생 동기화는 유튜브 페이지에서 별도로 확인해야 합니다.</p>
+<section><h2>서버 상태</h2><output id="health">확인 중…</output></section>
+<section><h2>실제 음성 테스트</h2><label for="source">원문</label><textarea id="source" rows="3" maxlength="300">The robot moves forward and then turns left.</textarea>
+<label for="provider">음성 엔진</label><select id="provider"><option value="windows-sapi">Windows 로컬 한국어 음성</option><option value="supertone">Supertone API</option></select>
+<p class="muted">번역은 설정된 API를 사용합니다. Windows 음성은 이 PC에서 생성되며 Supertone 음성 사용량을 소모하지 않습니다.</p>
+<button id="test">번역·음성 생성</button><output id="status" aria-live="polite">준비됨</output><output id="translation"></output><audio id="audio" controls hidden></audio><output id="detail" class="muted"></output>
+</section><section><h2>크롬에서 이어서 확인</h2><p>확장 프로그램을 새로고침한 뒤 유튜브 영상을 새로고침하세요. 패널의 <b>음성 엔진 → Windows 로컬 음성</b>을 선택하고 <b>Test</b>, <b>Start</b> 순서로 확인합니다.</p><p class="muted">로컬 테스트 성공은 크롬 확장 프로그램 전체의 동작 검증을 의미하지 않습니다.</p></section></main>
+<script>
+const $=id=>document.getElementById(id);
+fetch('/api/health').then(r=>r.json()).then(h=>{$('health').textContent=`서버 v${h.version||'?'} · ${h.platform||'?'} · 번역 API 키 ${h.provider.zaiConfigured?'설정됨':'없음'}\n사용 가능 음성 경로: ${(h.ttsProviders||[]).join(', ')} (외부 API 연결 성공 여부는 테스트로 확인)`}).catch(e=>{$('health').textContent=e.message});
+$('test').addEventListener('click',async()=>{
+ $('test').disabled=true;$('audio').pause();$('audio').hidden=true;$('translation').textContent='';$('detail').textContent='';$('status').className='';$('status').textContent='한국어 번역·음성 생성 중…';const started=performance.now();
+ try{const response=await fetch('/api/dub/prepare',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoId:'local-diagnostics',source:'manual-diagnostics',settings:{targetLang:'ko',ttsProvider:$('provider').value,speed:1.1},segments:[{index:0,start:0,end:5,text:$('source').value}]}),signal:AbortSignal.timeout(90000)});const result=await response.json();if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);const segment=result.segments?.[0];if(!segment?.audioUrl)throw new Error('재생할 음성이 없습니다.');$('translation').textContent=segment.translatedText;$('audio').src=segment.audioUrl;$('audio').hidden=false;$('detail').textContent=`번역: ${result.requestProvider.translation} · 음성: ${result.requestProvider.tts} · 길이: ${segment.duration}초 · 응답: ${((performance.now()-started)/1000).toFixed(2)}초 · 캐시: ${result.cache.hit?'재사용':'새로 생성'}`;$('status').textContent='번역·음성 생성 완료 — 아래 재생 버튼으로 들을 수 있습니다.';
+ }catch(e){$('status').className='error';$('status').textContent=e.message}finally{$('test').disabled=false}
+});
+$('audio').addEventListener('playing',()=>{$('status').textContent='한국어 음성 재생 중'});
+$('audio').addEventListener('ended',()=>{$('status').textContent='한국어 음성 재생 완료'});
+$('audio').addEventListener('error',()=>{$('status').className='error';$('status').textContent='음성을 재생하지 못했습니다.'});
+</script></html>

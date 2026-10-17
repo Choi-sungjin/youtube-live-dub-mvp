@@ -1,0 +1,6 @@
+backend/.cache
+backend/.env
+backend/.env.local
+native-host/
+.git/
+.vercel/
