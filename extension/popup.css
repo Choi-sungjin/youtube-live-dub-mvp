@@ -101,3 +101,5 @@ button:disabled {
   color: #cdd6e1;
   overflow-wrap: anywhere;
 }
+.media-actions { display:grid; gap:8px; border-top:1px solid #444; padding-top:12px; }
+[data-videos] { display:grid; gap:6px; overflow-wrap:anywhere; color:#cdd6e1; }

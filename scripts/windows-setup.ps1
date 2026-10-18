@@ -278,9 +278,10 @@ function Install-DubWindows {
         [IO.File]::WriteAllText((Join-Path $cache 'install-result.json'), ($report | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
         Write-Host "SETUP COMPLETE: Whisper $($choice.Device), Supertonic 3 at 1.15x. All three models are ready." -ForegroundColor Green
         Write-Host "Chrome: chrome://extensions -> Developer mode -> Load unpacked -> $Root\extension"
-        Write-Host 'Then open YouTube and check Test -> Start -> Stop -> seek.'
+        Write-Host 'MP4/web video: http://127.0.0.1:18789/player. Next time, run start-player.cmd.'
+        Write-Host 'YouTube: open a video and check Test -> Start -> Stop -> seek.'
         if (-not $NoBrowser) {
-            Start-Process -FilePath $resolved.Chrome -ArgumentList 'http://127.0.0.1:18789/diagnostics', 'chrome://extensions'
+            Start-Process -FilePath $resolved.Chrome -ArgumentList 'http://127.0.0.1:18789/player', 'chrome://extensions'
             Start-Process -FilePath explorer.exe -ArgumentList ('"' + (Join-Path $Root 'extension') + '"')
         }
     } finally { $lock.Dispose() }

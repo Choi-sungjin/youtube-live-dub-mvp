@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local Live Dub · MP4 / 웹영상</title><link rel="stylesheet" href="/player.css"></head>
+<body><main>
+<header><p class="eyebrow">LOCAL LIVE DUB · 0.7.0</p><h1>내 영상, 한국어로 듣기</h1><p>MP4 파일과 공개 웹영상을 로컬 AI로 번역합니다. 음성 생성 1.15배.</p></header>
+<section class="sources"><label class="file">MP4 파일 선택<input id="file" type="file" accept="video/mp4,.mp4"></label>
+<form id="web-form"><label for="url">공개 MP4 또는 영상 페이지 주소</label><div class="row"><input id="url" type="url" placeholder="https://…/video.mp4" required><button id="load-web">웹영상 열기</button></div></form>
+<p class="hint">최대 512 MB · 30분. 공개 MP4 기반 영상 지원. 로그인·DRM·HLS·blob 영상은 제외됩니다.</p></section>
+<p id="source-status" role="status">파일 또는 주소를 선택하세요.</p>
+<div id="choices" class="controls"></div>
+<video id="video" controls playsinline preload="auto"></video>
+<div class="controls"><button id="start" disabled>더빙 시작 / 재개</button><button id="pause" disabled>일시정지</button><button id="stop" disabled>더빙 정지</button><button id="back" disabled>10초 뒤로</button><button id="forward" disabled>10초 앞으로</button></div>
+<div class="row seek"><label for="seek">이동할 초</label><input id="seek" type="number" min="0" value="0" step="1"><button id="go" disabled>구간 이동</button></div>
+<section class="readout"><strong id="status" role="status">대기</strong><p id="translation">더빙을 시작하면 한국어 문장이 여기에 표시됩니다.</p><p id="original"></p><p id="error" role="alert"></p></section>
+<details><summary>재생·버퍼 상태</summary><pre id="metrics"></pre></details>
+<p class="hint">처음 시작할 때 원음 전체를 분석한 뒤 음성을 앞 구간부터 준비합니다. 준비되지 않은 구간으로 이동하면 영상이 기다렸다가 재개됩니다. 문장 끝 대기는 음성이 잘리지 않도록 하는 동작입니다.</p>
+</main><script type="module" src="/player.js"></script></body></html>

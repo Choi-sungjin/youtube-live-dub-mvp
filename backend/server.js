@@ -6,6 +6,7 @@ import { createLocalTranslator, LOCAL_TRANSLATION_REVISION, DEFAULT_LOCAL_MODEL 
 import { translationContext } from './caption-context.js';
 import { applyVerifiedCaptionTerms } from './verified-caption-terms.js';
 import { speechText, SPEECH_TEXT_REVISION, normalizeDubbingTranslation } from './speech-text.js';
+import { createMediaRouter } from './media-router.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -63,10 +64,14 @@ const SUPERTONE_VOICES = {
 await mkdir(AUDIO_DIR, { recursive: true });
 await mkdir(STT_DIR, { recursive: true });
 await mkdir(AUDIT_DIR, { recursive: true });
+const mediaRoute = createMediaRouter({ root: ROOT_DIR, transcribe: transcribeFast, prepare: prepareDub });
 
 const server = createServer(async (req, res) => {
   try {
     setCors(res);
+
+    const mediaUrl = new URL(req.url || '/', `http://${req.headers.host}`);
+    if (await mediaRoute(req, res, mediaUrl)) return;
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -222,7 +227,7 @@ function providerInfo() {
   };
 }
 
-async function prepareDub(body) {
+async function prepareDub(body, mediaTranscript) {
   const requestStarted = performance.now();
   const timings = {};
   const videoId = String(body?.videoId || '').trim();
@@ -237,7 +242,7 @@ async function prepareDub(body) {
     throw httpError(400, 'segments must contain at least one timed text segment.');
   }
 
-  const transcript = activeTranslationProvider() === 'ollama' ? await readCachedSttCaptions(videoId).catch(() => ({segments:[]})) : {segments:[]};
+  const transcript = Array.isArray(mediaTranscript) ? {segments:mediaTranscript} : activeTranslationProvider() === 'ollama' ? await readCachedSttCaptions(videoId).catch(() => ({segments:[]})) : {segments:[]};
   const limitedSegments = segments.slice(0, 80).map(segment => ({...segment,
     contextBefore: transcript.segments.filter(s=>s.end<=segment.start).slice(-2).map(s=>s.text).join(' ').slice(-240),
     contextAfter: transcript.segments.filter(s=>s.start>=segment.end).slice(0,2).map(s=>s.text).join(' ').slice(0,240),

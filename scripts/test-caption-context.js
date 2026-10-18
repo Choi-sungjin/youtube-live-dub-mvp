@@ -58,3 +58,14 @@ test('an invented farewell is retried, while a source farewell is preserved',asy
     assert.equal(result.get(0),source.startsWith('Like')?'정말 쉬워요.':'또 봐요.');
   }
 });
+
+test('a visit-reason question cannot be shortened into a yes/no arrival question',async()=>{
+  let calls=0;
+  const translator=createLocalTranslator({fetchImpl:async(_url,options)=>{
+    const payload=JSON.parse(JSON.parse(options.body).messages[1].content);calls++;
+    const text=calls===1?'준비':calls===2?'여기 왔나요?':'여긴 왜 왔나요?';
+    return new Response(JSON.stringify({message:{content:JSON.stringify({translations:payload.segments.map(s=>({index:s.index,text}))})}}));
+  }});
+  const result=await translator.translate([{index:0,start:0,end:5,text:'What brings you here?'}]);
+  assert.equal(result.get(0),'여긴 왜 왔나요?');assert.ok(calls>=3);
+});
