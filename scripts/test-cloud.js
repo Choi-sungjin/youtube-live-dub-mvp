@@ -14,7 +14,7 @@ const env = {
 };
 const checks = [
   ['Syntax and version consistency', ['scripts/check.js']],
-  ['Regression tests (local fixtures)', ['--test', 'scripts/test-regressions.js']],
+  ['Regression tests (local fixtures)', ['--test', 'scripts/test-regressions.js', 'scripts/test-caption-context.js', 'scripts/test-media-session.js']],
   ['Mock translation/audio contract', ['scripts/test-vercel-core.js']]
 ];
 

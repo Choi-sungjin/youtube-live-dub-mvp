@@ -4,6 +4,8 @@
   top: 84px;
   z-index: 2147483647;
   width: 292px;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
   box-sizing: border-box;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
@@ -180,3 +182,7 @@
   margin-top: 4px;
   color: #ffb3b3;
 }
+
+.yld-diagnostics { margin-top: 8px; color: #cdd6e1; }
+.yld-diagnostics summary { cursor: pointer; }
+.yld-diagnostics pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 Arial, sans-serif; }

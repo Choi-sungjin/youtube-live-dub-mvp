@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { transcribeWithFallback } from '../lib/stt-fallback.js';
+import { timedClauses } from '../lib/timed-transcript.js';
+import { normalizeTechnicalTranscript } from '../lib/transcript-terms.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -41,7 +44,7 @@ const audioPath = path.join(SOURCE_DIR, `${videoId}.wav`);
 const rawWhisperJson = await preprocess();
 const sttWindow = sttWindowFromOptions(args);
 const segments = normalizeWhisperSegments(rawWhisperJson, args)
-  .flatMap((segment) => splitLongSegment(segment, {
+  .flatMap((segment) => rawWhisperJson.segments.some(item => item.words?.length) ? [segment] : splitLongSegment(segment, {
     maxDuration: Number(args.maxSegmentDuration || 3.8),
     maxChars: Number(args.maxChars || 120)
   }))
@@ -54,12 +57,17 @@ const segments = normalizeWhisperSegments(rawWhisperJson, args)
   .filter((segment) => segment.end > segment.start && segment.text);
 
 if (!segments.length) {
-  fail('STT completed, but no speech segments were produced.');
+  console.log('STT completed: no speech in this window; recording inspected coverage.');
 }
 
 const segmentPath = path.join(STT_DIR, `${videoId}.segments.json`);
 const previousPayload = await readExistingSegmentPayload(segmentPath);
-const previousSegments = normalizeStoredSegments(previousPayload?.segments);
+const modelMatches = previousPayload?.sttModel === args.sttModel;
+if (previousPayload && !modelMatches) {
+  await writeFile(`${segmentPath}.${Date.now()}.previous.json`, JSON.stringify(previousPayload, null, 2));
+}
+const previousSegments = normalizeStoredSegments(modelMatches ? previousPayload?.segments : [])
+  .filter(segment => sttWindow.endTime && (segment.end <= sttWindow.startTime || segment.start >= sttWindow.endTime));
 const mergedSegments = mergeTimedSegments(previousSegments, segments);
 await writeFile(segmentPath, JSON.stringify({
   videoId,
@@ -72,7 +80,7 @@ await writeFile(segmentPath, JSON.stringify({
   windowDuration: sttWindow.duration ? roundTime(sttWindow.duration) : 0,
   windowEnd: sttWindow.endTime ? roundTime(sttWindow.endTime) : 0,
   coverageEnd: getLastSegmentEnd(mergedSegments),
-  windows: appendSttWindow(previousPayload?.windows, {
+  windows: appendSttWindow(modelMatches ? previousPayload?.windows : [], {
     start: roundTime(sttWindow.startTime),
     end: sttWindow.endTime ? roundTime(sttWindow.endTime) : getLastSegmentEnd(segments),
     duration: sttWindow.duration ? roundTime(sttWindow.duration) : 0,
@@ -115,14 +123,40 @@ async function preprocess() {
   await mkdir(rawOutputDir, { recursive: true });
 
   if (!args.noStt) {
-    const whisperCommand = resolveWhisperCommand();
-    if (!whisperCommand) {
-      fail('Install openai-whisper before running STT. Expected either `whisper` or `python3 -m whisper`.');
+    const legacy = async () => {
+      const whisperCommand = resolveWhisperCommand();
+      if (!whisperCommand) {
+        fail('Install openai-whisper before running STT. Expected either `whisper` or `python3 -m whisper`.');
+      }
+      await runWhisper(whisperCommand, sttInputPath, rawOutputDir, args);
+    };
+    if (process.send && process.env.YLD_FAST_STT !== '0') {
+      if ((args.sttModel || 'tiny') === 'tiny') await transcribeWithFallback(() => runFastWhisper(sttInputPath, rawOutputDir, args), legacy);
+      else await runFastWhisper(sttInputPath, rawOutputDir, args);
+    } else {
+      await legacy();
     }
-    await runWhisper(whisperCommand, sttInputPath, rawOutputDir, args);
   }
 
   return readWhisperJson(videoId, rawOutputDir);
+}
+
+async function runFastWhisper(inputPath, outputDir, options) {
+  const existing = await findWhisperJson(videoId, outputDir);
+  if (!options.force && existing) return;
+  const id = `${Date.now()}-${videoId}`;
+  const result = await new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); process.off('message', receive); };
+    const receive = message => {
+      if (message?.type !== 'YLD_STT_RESULT' || message.id !== id) return;
+      cleanup(); if (message.error) reject(new Error(message.error)); else resolve(message.result);
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('Fast STT response timed out')); }, 240000);
+    process.on('message', receive);
+    process.send({ type: 'YLD_STT_REQUEST', id, inputPath, model: options.sttModel || 'tiny', language: options.language || 'auto' });
+  });
+  await writeFile(path.join(outputDir, `${videoId}.json`), JSON.stringify(result));
+  console.log(`Fast STT: ${result.inferenceMs}ms, ${result.segments.length} segments`);
 }
 
 async function downloadOriginalAudio(url, outputPath, options) {
@@ -242,7 +276,8 @@ function rawSttOutputDir(videoId, options) {
   const durationKey = sttWindowKey(sttWindowFromOptions(options));
   const modelKey = String(options.sttModel || 'small').replace(/[^A-Za-z0-9._-]/g, '_');
   const languageKey = String(options.language || 'auto').replace(/[^A-Za-z0-9._-]/g, '_');
-  return path.join(RAW_STT_DIR, `${videoId}-${durationKey}-${modelKey}-${languageKey}`);
+  const engineKey = process.send && process.env.YLD_FAST_STT !== '0' ? '-fast-v1' : '';
+  return path.join(RAW_STT_DIR, `${videoId}-${durationKey}-${modelKey}-${languageKey}${engineKey}`);
 }
 
 async function readWhisperJson(videoId, outputDir) {
@@ -270,7 +305,7 @@ function normalizeWhisperSegments(payload, options) {
   const sttWindow = sttWindowFromOptions(options);
   const startOffset = sttWindow.startTime || 0;
   const clipEnd = sttWindow.endTime || 0;
-  return payload.segments
+  return normalizeTechnicalTranscript(timedClauses(payload.segments))
     .map((segment) => ({
       start: Number(segment.start) + startOffset,
       end: Number(segment.end) + startOffset,
