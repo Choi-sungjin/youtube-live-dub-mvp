@@ -2,7 +2,7 @@
 
 ZIP을 **압축 해제한 뒤 프로젝트 맨 위의 `install-windows.cmd`를 더블클릭**한다. 기본값은 GPU 자동 선택이다. 기존 수동 설치 명령을 하나씩 실행할 필요가 없다. 음성 생성 속도는 **Supertonic 3에서 1.15배**, 일반 1배속 영상의 더빙 재생 속도는 1배로 유지한다.
 
-자동 설치 추가본은 [codex/windows-auto-install ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/windows-auto-install.zip)에서 받을 수 있다. 비공개 저장소이므로 접근 권한이 있는 GitHub 계정으로 로그인한다. 설치 파일 하나만 받으면 필요한 소스와 requirements가 없으므로 전체 ZIP을 받는다.
+자동 설치가 포함된 최신 버전은 [main ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)에서 받는다. 비공개 저장소이므로 접근 권한이 있는 GitHub 계정으로 로그인한다. 설치 파일 하나만 받으면 필요한 소스와 requirements가 없으므로 전체 ZIP을 받는다.
 
 ## 실행 순서
 
