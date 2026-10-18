@@ -4,6 +4,8 @@
 
 기준 구성: 로컬 Gemma 4 E4B 번역, Supertonic 3 음성 생성 **1.15배**, 자막이 없을 때 faster-whisper 음성 인식. 현재 검증 대상은 YouTube 일반 동영상 페이지다. 다른 SNS는 설계·프로토타입 단계다.
 
+**자동 설치를 원하면 [자동 설치 안내](auto-install-windows.md)의 ZIP을 받고 `install-windows.cmd`를 실행한다.** 필수 도구, Python 패키지, 모델 다운로드와 GPU/CPU 설정, 서버 시작을 처리한다. 아래는 직접 구성할 때 사용하는 수동 절차다.
+
 > 최신 배포 코드는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main) 또는 [소스 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)로 받는다. 게시·업데이트 절차는 [GitHub 게시 안내](publish-github.md)를 따른다. 모델·캐시·API 키·개인 환경 설정은 다운로드에 포함되지 않는다.
 
 ## 1. 준비물

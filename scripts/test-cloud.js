@@ -14,7 +14,7 @@ const env = {
 };
 const checks = [
   ['Syntax and version consistency', ['scripts/check.js']],
-  ['Regression tests (local fixtures)', ['--test', 'scripts/test-regressions.js', 'scripts/test-caption-context.js', 'scripts/test-media-session.js']],
+  ['Regression tests (local fixtures)', ['--test', 'scripts/test-regressions.js', 'scripts/test-caption-context.js', 'scripts/test-media-session.js', 'scripts/test-installer-health.js']],
   ['Mock translation/audio contract', ['scripts/test-vercel-core.js']]
 ];
 
@@ -22,6 +22,14 @@ console.log(`Cloud checks: Node ${process.version}, ${process.platform}/${proces
 for (const [name, args] of checks) {
   console.log(`\nRunning: ${name}`);
   const result = spawnSync(process.execPath, args, {
+    cwd: root, env, stdio: 'inherit', windowsHide: true, timeout: 60000
+  });
+  if (result.error) console.error(result.error.message);
+  if (result.status !== 0) process.exit(result.status || 1);
+}
+if (process.platform === 'win32') {
+  console.log('\nRunning: Windows installer fixtures (no installation or downloads)');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/test-windows-setup.ps1'], {
     cwd: root, env, stdio: 'inherit', windowsHide: true, timeout: 60000
   });
   if (result.error) console.error(result.error.message);
