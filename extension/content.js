@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.6.0";
+  const BUILD_VERSION = "0.6.1";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -591,6 +591,9 @@
     }
 
     if (state.video.paused || state.video.ended) {
+      // Reaching the final video frame is different from a user pause: let an
+      // already playing final sentence finish at its original 1.15 generation speed.
+      if (state.video.ended && state.currentAudio && !state.currentAudio.ended) return;
       if (state.currentAudio && !state.currentAudio.paused) {
         state.currentAudio.pause();
       }
@@ -629,6 +632,10 @@
     // Supertonic files already contain the requested 1.15x speech. Do not retime them again.
     const syncRate = item.ttsModel === "supertonic-3" ? 1 : clampPlaybackRate(audioDuration / segmentDuration);
     const elapsed = Math.max(0, (videoTime - item.start) * syncRate);
+    // A clip may start slightly before its caption. HTMLMediaElement.play() on
+    // an ended clip restarts it from zero even while video elapsed is still short
+    // of duration. Keep the completed clip until the next caption or a real seek.
+    if (item.chunkIndex === state.currentChunkIndex && state.currentAudio?.ended) return;
     if (elapsed >= audioDuration) {
       stopCurrentAudio();
       return;
@@ -2944,6 +2951,7 @@
     const finite = value => Number.isFinite(value) ? value.toFixed(2) : "—";
     const mode = media => !media ? "없음" : media.error ? "오류" : media.ended ? "완료" : media.paused ? "일시정지" : "재생 중";
     els.diagnostics.textContent = [
+      '재생 코드: completed-clip-v2',
       `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
       `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
       `더빙: ${finite(audio?.currentTime)} / ${finite(audio?.duration)}초 · ${mode(audio)}`,

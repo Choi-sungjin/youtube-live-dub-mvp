@@ -2,15 +2,20 @@ import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
 import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus, closeSupertonic } from './supertonic-speech.js';
 import { createDiskTextCache } from './disk-text-cache.js';
 import { warmFastStt, fastSttStatus, transcribeFast, closeFastStt } from './fast-stt.js';
+import { createLocalTranslator, LOCAL_TRANSLATION_REVISION, DEFAULT_LOCAL_MODEL } from './local-translation.js';
+import { translationContext } from './caption-context.js';
+import { applyVerifiedCaptionTerms } from './verified-caption-terms.js';
+import { speechText, SPEECH_TEXT_REVISION, normalizeDubbingTranslation } from './speech-text.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
+const APP_VERSION = JSON.parse(await readFile(path.join(ROOT_DIR, 'package.json'), 'utf8')).version;
 
 await loadEnvFile(path.join(__dirname, '.env'));
 await loadEnvFile(path.join(__dirname, '.env.local'));
@@ -21,6 +26,7 @@ const HOST = process.env.HOST || '127.0.0.1';
 const CACHE_DIR = path.join(__dirname, '.cache');
 const AUDIO_DIR = path.join(CACHE_DIR, 'audio');
 const STT_DIR = path.join(CACHE_DIR, 'stt');
+const AUDIT_DIR = path.join(CACHE_DIR, 'audit');
 const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const ZAI_CHAT_COMPLETIONS_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
 const SUPERTONE_TTS_URL = 'https://supertoneapi.com/v1/text-to-speech';
@@ -32,6 +38,8 @@ const MAX_TRANSLATION_CACHE_ITEMS = 5000;
 const ZAI_RETRY_DELAYS_MS = [1500, 3500];
 const ZAI_RATE_LIMIT_COOLDOWN_MS = 60_000;
 let zaiRateLimitUntil = 0;
+const LOCAL_TRANSLATOR = createLocalTranslator({ baseUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434', model: process.env.OLLAMA_MODEL || DEFAULT_LOCAL_MODEL });
+let localTranslationWarmTimer;
 
 const SUPERTONE_VOICES = {
   lowMale: {
@@ -54,6 +62,7 @@ const SUPERTONE_VOICES = {
 
 await mkdir(AUDIO_DIR, { recursive: true });
 await mkdir(STT_DIR, { recursive: true });
+await mkdir(AUDIT_DIR, { recursive: true });
 
 const server = createServer(async (req, res) => {
   try {
@@ -77,11 +86,12 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/api/health')) {
       json(res, 200, {
         ok: true,
-        version: '0.6.0',
+        version: APP_VERSION,
         platform: process.platform,
         ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone'] : ['supertonic3', 'supertone'],
         supertonic: supertonicStatus(),
         stt: fastSttStatus(),
+        localTranslation: LOCAL_TRANSLATOR.status(),
         provider: providerInfo(),
         voices: Object.values(SUPERTONE_VOICES),
         port: PORT
@@ -92,6 +102,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/dub/prepare') {
       const body = await readJson(req);
       const result = await prepareDub(body);
+      if (process.env.YLD_AUDIT === '1') await appendFile(path.join(AUDIT_DIR, `${hashValue(result.videoId)}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n');
       json(res, 200, result);
       return;
     }
@@ -162,9 +173,14 @@ server.listen(PORT, HOST, () => {
   console.log(`YouTube Live Dub backend listening at http://${HOST}:${PORT}`);
   if (activeTtsProvider() === 'supertonic3') warmSupertonic().catch(error => console.warn(error.message));
   if (process.env.YLD_FAST_STT !== '0') warmFastStt().catch(error => console.warn(`Fast STT: ${error.message}`));
+  if (activeTranslationProvider() === 'ollama') {
+    LOCAL_TRANSLATOR.warm().catch(error => console.warn(error.message));
+    localTranslationWarmTimer = setInterval(() => LOCAL_TRANSLATOR.warm({ refresh: true }).catch(error => console.warn(error.message)), 10 * 60 * 1000);
+    localTranslationWarmTimer.unref();
+  }
 });
 
-function closeWorkers() { closeFastStt(); closeSupertonic(); }
+function closeWorkers() { clearInterval(localTranslationWarmTimer); closeFastStt(); closeSupertonic(); }
 server.on('close', closeWorkers);
 for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
   closeWorkers();
@@ -173,9 +189,9 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
 
 function providerInfo() {
   const translationProvider = normalizeProvider(
-    process.env.TRANSLATION_PROVIDER || 'zai',
-    ['zai', 'openai', 'mock'],
-    'zai'
+    process.env.TRANSLATION_PROVIDER || 'ollama',
+    ['ollama', 'zai', 'openai', 'mock'],
+    'ollama'
   );
   const ttsProvider = normalizeProvider(
     process.env.TTS_PROVIDER || 'supertonic3',
@@ -186,6 +202,8 @@ function providerInfo() {
   return {
     script: translationProvider,
     translation: translationProvider,
+    translationModel: translationProvider === 'ollama' ? LOCAL_TRANSLATOR.status().model : translationProvider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || 'gpt-5.2',
+    translationLocation: translationProvider === 'ollama' ? 'local' : translationProvider === 'mock' ? 'test' : 'external',
     tts: ttsProvider,
     openaiModel: process.env.OPENAI_MODEL || 'gpt-5.2',
     zaiModel: process.env.ZAI_MODEL || 'glm-4.7',
@@ -208,7 +226,7 @@ async function prepareDub(body) {
   const videoId = String(body?.videoId || '').trim();
   const settings = normalizeSettings(body?.settings);
   const inputSegments = Array.isArray(body?.segments) ? body.segments : [];
-  const segments = inputSegments.map((segment, index) => normalizeSegment(segment, index)).filter(Boolean);
+  const segments = applyVerifiedCaptionTerms(videoId, inputSegments.map((segment, index) => normalizeSegment(segment, index)).filter(Boolean));
 
   if (!videoId) {
     throw httpError(400, 'videoId is required.');
@@ -217,7 +235,12 @@ async function prepareDub(body) {
     throw httpError(400, 'segments must contain at least one timed text segment.');
   }
 
-  const limitedSegments = segments.slice(0, 80);
+  const transcript = activeTranslationProvider() === 'ollama' ? await readCachedSttCaptions(videoId).catch(() => ({segments:[]})) : {segments:[]};
+  const limitedSegments = segments.slice(0, 80).map(segment => ({...segment,
+    contextBefore: transcript.segments.filter(s=>s.end<=segment.start).slice(-2).map(s=>s.text).join(' ').slice(-240),
+    contextAfter: transcript.segments.filter(s=>s.start>=segment.end).slice(0,2).map(s=>s.text).join(' ').slice(0,240),
+    contextTopic: transcript.segments.filter(s=>s.end>=segment.start-45 && s.start<=segment.end+20).map(s=>s.text).join(' ').slice(-2200),
+  }));
   const translationStarted = performance.now();
   const translated = await translateSegments(limitedSegments, settings, timings);
   timings.translationMs = Math.round(performance.now() - translationStarted);
@@ -227,13 +250,18 @@ async function prepareDub(body) {
   const preparedItems = await mapLimit(limitedSegments, ttsConcurrency, async (segment) => {
     const translation = translated.get(segment.index);
     if (!translation) throw httpError(502, `Translation missing for segment ${segment.index}.`);
-    const spokenText = clampTextForTts(translation);
+    // Local translation has already shortened and checked required facts. Do not
+    // silently remove the end of a complete sentence after that validation.
+    const spokenText = normalizeDubbingTranslation(activeTranslationProvider() === 'ollama' ? cleanText(translation) : clampTextForTts(translation), segment.text, settings.targetLang);
+    const synthesisText = settings.ttsProvider === 'supertonic3' ? speechText(spokenText, settings.targetLang) : spokenText;
     const cacheKey = {
       schemaVersion: 2,
       videoId,
-      segment,
+      segment: { index: segment.index, start: segment.start, end: segment.end, text: segment.text },
       settings: cacheableSettings(settings),
       translatedText: spokenText,
+      speechText: synthesisText,
+      speechTextRevision: SPEECH_TEXT_REVISION,
       providers: {
         translation: activeTranslationProvider(),
         tts: activeTtsProvider(settings)
@@ -250,7 +278,7 @@ async function prepareDub(body) {
 
     if (!exists) {
       const result = await synthesizeSpeech({
-        text: spokenText,
+        text: synthesisText,
         duration: sourceDuration,
         settings,
         outputPath: audioPath
@@ -271,6 +299,7 @@ async function prepareDub(body) {
         endMs: Math.round(segment.end * 1000),
         sourceText: segment.text,
         translatedText: spokenText,
+        speechText: synthesisText,
         audioUrl: `http://${HOST}:${PORT}/audio/${id}.wav`,
         duration: roundTime(audioDuration),
         durationMs: Math.round(audioDuration * 1000),
@@ -403,8 +432,11 @@ async function readCachedSttCaptions(videoId) {
   }
 
   const rawSegments = Array.isArray(payload) ? payload : payload?.segments;
+  if (process.env.YLD_STT_MODEL && payload?.sttModel !== process.env.YLD_STT_MODEL) {
+    return { videoId, source: 'local-stt-cache-model-mismatch', segments: [], windows: [] };
+  }
   const segments = Array.isArray(rawSegments)
-    ? rawSegments.map((segment, index) => normalizeSegment(segment, index)).filter(Boolean)
+    ? applyVerifiedCaptionTerms(videoId, rawSegments.map((segment, index) => normalizeSegment(segment, index)).filter(Boolean))
     : [];
 
   return {
@@ -478,7 +510,7 @@ async function startCaptionPreprocess(body) {
     '--language',
     String(body?.language || 'auto'),
     '--stt-model',
-    String(body?.sttModel || process.env.YLD_STT_MODEL || 'base'),
+    String(process.env.YLD_STT_MODEL || body?.sttModel || 'tiny'),
     '--prewarm-segments',
     String(prewarmSegments),
     '--backend',
@@ -677,7 +709,9 @@ async function translateSegments(segments, settings, metrics = {}) {
 
   let providerTranslations = new Map();
   try {
-    if (provider === 'zai' && process.env.ZAI_API_KEY) {
+    if (provider === 'ollama') {
+      providerTranslations = await LOCAL_TRANSLATOR.translate(missing, settings, metrics);
+    } else if (provider === 'zai' && process.env.ZAI_API_KEY) {
       if (Date.now() < zaiRateLimitUntil) {
         throw httpError(429, 'Z.ai rate limit cooldown is active.');
       }
@@ -981,7 +1015,9 @@ function translationCacheKey(segment, settings, provider) {
   return hashValue({
     schemaVersion: 1,
     provider,
-    model: provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || 'gpt-5.2',
+    model: provider === 'ollama' ? LOCAL_TRANSLATOR.status().model : provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || 'gpt-5.2',
+    localRevision: provider === 'ollama' ? LOCAL_TRANSLATION_REVISION : undefined,
+    context: provider === 'ollama' ? translationContext(segment) : undefined,
     targetLang: settings.targetLang,
     start: roundTime(segment.start),
     end: roundTime(segment.end),
@@ -1132,7 +1168,7 @@ async function fileExists(filePath) {
 }
 
 function activeTranslationProvider() {
-  return normalizeProvider(process.env.TRANSLATION_PROVIDER || 'zai', ['zai', 'openai', 'mock'], 'zai');
+  return normalizeProvider(process.env.TRANSLATION_PROVIDER || 'ollama', ['ollama', 'zai', 'openai', 'mock'], 'ollama');
 }
 
 function activeTtsProvider(settings) {

@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 
 let runtime;
 export function fastSttStatus() {
-  return { engine: 'faster-whisper-cpu-int8', ready: Boolean(runtime?.ready), loadMs: runtime?.loadMs ?? null, queued: runtime?.pending.size || 0 };
+  return { engine: runtime?.engine || `faster-whisper-${process.env.YLD_STT_DEVICE || 'cpu'}-${process.env.YLD_STT_COMPUTE || 'int8'}`, model: runtime?.model || process.env.YLD_STT_MODEL || 'tiny', ready: Boolean(runtime?.ready), loadMs: runtime?.loadMs ?? null, queued: runtime?.pending.size || 0 };
 }
 export async function warmFastStt() { await start().readyPromise; return fastSttStatus(); }
 export function closeFastStt() {
@@ -40,7 +40,7 @@ function start() {
     if ('ready' in message) {
       clearTimeout(timer);
       if (!message.ready) { fail(new Error(message.error)); child.kill(); return; }
-      record.ready = true; record.loadMs = message.loadMs; resolveReady(record); return;
+      record.ready = true; record.loadMs = message.loadMs; record.engine = message.engine; record.model = message.model; resolveReady(record); return;
     }
     const pending = record.pending.get(message.id); if (!pending) return;
     clearTimeout(pending.timer); record.pending.delete(message.id);

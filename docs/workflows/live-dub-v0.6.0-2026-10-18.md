@@ -1,5 +1,7 @@
 # YouTube Live Dub v0.6.0 워크플로우
 
+> 이 문서는 Z.ai를 사용하던 시점의 검증 기록입니다. 이후 적용한 로컬 Gemma 구성과 검증 상태는 [로컬 Gemma 워크플로우](live-dub-local-gemma-2026-10-18.md)를 참고하세요.
+
 2026-10-18 · Windows 로컬 서버 + Chrome 확장 · Supertonic 3 생성 속도 **1.15배 고정**
 
 현재 검사 대상: [Stefan 3D AI 영상](https://www.youtube.com/watch?v=2hqcDHnyJaY).

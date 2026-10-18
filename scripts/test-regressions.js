@@ -12,6 +12,35 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
+import { createLocalTranslator } from '../backend/local-translation.js';
+import { timedClauses } from '../lib/timed-transcript.js';
+import { speechText, normalizeDubbingTranslation } from '../backend/speech-text.js';
+import { normalizeTechnicalTranscript } from '../lib/transcript-terms.js';
+
+test('AI glossary corrections are scoped and preserve the raw transcript', () => {
+  const general=[{text:'Cloud Quotes and anti-gravity are unrelated.'}];
+  assert.deepEqual(normalizeTechnicalTranscript(general),general);
+  const raw='Gemini 4 and Cloud Opus 5.5, which is our guess today. Hicksfield and Cloud Quotes.';
+  const result=normalizeTechnicalTranscript([{text:raw}])[0];
+  assert.equal(result.rawText,raw);
+  assert.equal(result.text,'Gemini 4 and Claude Opus 5.5, which is our guest today. Higgsfield and Claude Code.');
+});
+
+test('word-aligned captions preserve actual silence and sentence boundaries', () => {
+  const words=[{start:0,end:1,word:' Hello.'},{start:1,end:2,word:' Welcome.'},{start:12,end:13,word:' Again.'}];
+  const result=timedClauses([{start:0,end:13,text:'Hello. Welcome. Again.',words}]);
+  assert.equal(result.length,2);assert.equal(result[0].end,2);assert.equal(result[1].start,12);
+  assert.equal(result.map(s=>s.text).join(' '),'Hello. Welcome. Again.');
+  const legacy=[{start:0,end:2,text:'Legacy caption'}];assert.deepEqual(timedClauses(legacy),legacy);
+});
+
+test('Korean speech normalizes technical names without altering display translations', () => {
+  const text='Gemini 4와 Opus 5.5, GPT-6의 API로 Blender 3D를 만듭니다.';
+  assert.equal(speechText(text,'ko'),'제미나이 사와 오퍼스 오점오, 지피티 육의 에이피아이로 블렌더 쓰리디를 만듭니다.');
+  assert.equal(speechText(text,'en'),text);
+  assert.equal(speechText('21.35달러, API로 UI 변경','ko'),'21점삼오달러, 에이피아이로 유아이 변경');
+  assert.equal(speechText('Rapid example','ko'),'Rapid example');
+});
 
 test('native host answers a fragmented frame while stdin remains open', async () => {
   const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}'); });
@@ -201,6 +230,34 @@ test('a short completed voice is not repeatedly replayed at the end of its capti
   assert.equal(plays, 1); assert.equal(audio.paused, true);
 });
 
+test('early-started audio cannot replay its first syllable when it ends before the video offset', async () => {
+  const f=await contentFixture();let plays=0;
+  const audio={...fakeSpeech(2),play(){plays++;if(this.ended)this.currentTime=0;this.ended=false;this.paused=false;return Promise.resolve();}};
+  f.state.running=true;f.state.chunks=[{index:0,start:10,end:15}];
+  f.state.prepared=[{chunkIndex:0,start:10,end:15,ttsModel:'supertonic-3',audio}];
+  f.video.currentTime=9.9;f.syncAudioToVideo();assert.equal(plays,1);
+  audio.currentTime=2;audio.ended=true;audio.paused=true;
+  f.state.lastSyncVideoTime=11.75;f.video.currentTime=11.85;f.syncAudioToVideo();
+  f.video.currentTime=11.95;f.syncAudioToVideo();assert.equal(plays,1);
+  f.video.currentTime=12.1;f.syncAudioToVideo();
+  f.video.currentTime=10.3;f.syncAudioToVideo();assert.equal(plays,2);
+});
+
+test('the final spoken sentence can finish after video end, while Stop still cuts it immediately', async () => {
+  const f=await contentFixture();const audio=fakeSpeech(4);audio.paused=false;audio.currentTime=2;
+  f.state.running=true;f.state.currentAudio=audio;f.state.currentChunkIndex=0;
+  f.state.chunks=[{index:0,start:8,end:10}];f.state.prepared=[{chunkIndex:0,start:8,end:10,audio,ttsModel:'supertonic-3'}];
+  f.video.currentTime=10;f.video.duration=10;f.video.ended=true;f.video.paused=true;
+  f.syncAudioToVideo();assert.equal(audio.paused,false);
+  f.stopDub();assert.equal(audio.paused,true);
+});
+
+test('a malformed closing particle gets its source-supported verb restored', () => {
+  assert.equal(normalizeDubbingTranslation('스테프였습니다. 다음 영상에서 요.','That was Steph. See you in the next one.','ko'),'스테프였습니다. 다음 영상에서 봐요.');
+  assert.equal(normalizeDubbingTranslation('서울에서요.','In Seoul.','ko'),'서울에서요.');
+  assert.equal(normalizeDubbingTranslation('제미나이 5 나올 때 요.','So see you guys when Gemini 5 is out.','ko'),'제미나이 5 나올 때 봐요.');
+});
+
 test('seeking behind a distant prepared block requests the missing current audio first', async () => {
   const requests = [];
   const f = await contentFixture({ prepare: async payload => {
@@ -357,4 +414,147 @@ test('seeking into a hole between inspected windows prepares that position befor
   assert.equal(f.state.prepared[0].audio,later);
   assert.ok(f.state.chunks.some(chunk=>chunk.start===48));
   f.stopDub(); pending.resolve(true);
+});
+
+function localResponse(translations) {
+  return new Response(JSON.stringify({message:{content:JSON.stringify({translations})},done_reason:'stop',load_duration:1e6}),{headers:{'content-type':'application/json'}});
+}
+
+test('local translator preloads once, keeps the model warm and uses only loopback', async () => {
+  const requests=[];
+  const translator=createLocalTranslator({fetchImpl:async(url,options)=>{
+    const body=JSON.parse(options.body);requests.push({url,options,body});
+    return localResponse(JSON.parse(body.messages[1].content).segments.map(segment=>({index:segment.index,text:'준비'})));
+  }});
+  await Promise.all([translator.warm(),translator.warm()]);
+  assert.equal(requests.length,1);assert.equal(translator.status().warming,false);
+  await translator.translate([{index:5,start:0,end:3,text:'Hello.'}]);
+  assert.equal(requests.length,2);
+  assert.ok(requests.every(r=>new URL(r.url).hostname==='127.0.0.1'&&r.options.redirect==='error'&&r.body.think===false&&r.body.keep_alive==='30m'));
+  assert.equal(requests[1].body.format.properties.translations.minItems,1);
+  assert.deepEqual(requests[1].body.format.properties.translations.items.properties.index.enum,[5]);
+  assert.throws(()=>createLocalTranslator({baseUrl:'https://example.com'}),/loopback/);
+  assert.throws(()=>createLocalTranslator({model:'gemma-cloud'}),/cloud model/);
+});
+
+test('a shortening attempt cannot discard version numbers or truncate the original translation', async () => {
+  let calls=0;
+  const original='3.1 버전은 저장하기 전에 절대로 전원을 끄면 안 됩니다.';
+  const translator=createLocalTranslator({fetchImpl:async()=>localResponse([{index:0,text:++calls===1?'준비':calls===2?original:'전원은 끄지 마세요.'}])});
+  const metrics={};const result=await translator.translate([{index:0,start:0,end:2,text:'Do not switch off before saving version 3.1.'}],{targetLang:'ko'},metrics);
+  assert.equal(result.get(0),original);assert.equal(metrics.lengthRepairSegments,1);assert.equal(metrics.overBudgetSegments,1);
+});
+
+test('missing version numbers are repaired or fail explicitly', async () => {
+  for(const repaired of [true,false]){
+    let calls=0;const translator=createLocalTranslator({fetchImpl:async()=>localResponse([{index:0,text:++calls===1?'준비':calls===2?'프로 버전입니다.':repaired?'3.1 프로입니다.':'프로예요.'}])});
+    const request=translator.translate([{index:0,start:0,end:5,text:'This is Pro 3. 1.'}]);
+    if(repaired)assert.equal((await request).get(0),'3.1 프로입니다.');else await assert.rejects(request,/lost a number/);
+  }
+});
+
+test('product names must survive shortening even when version numbers are retained', async () => {
+  for (const repaired of [true,false]) {
+    let calls=0;
+    const translator=createLocalTranslator({fetchImpl:async()=>localResponse([{index:0,text:++calls===1?'준비':calls===2?'4.1 말고 4.2를 쓰세요. 인터넷은 필요 없어요.':repaired?'블렌더 4.1 말고 4.2를 쓰세요. 인터넷은 필요 없어요.':'4.2를 쓰세요. 4.1은 쓰지 마세요.'}])});
+    const result=translator.translate([{index:0,start:0,end:6,text:'Use Blender 4.2, not 4.1. This does not require an internet connection.'}]);
+    if(repaired)assert.match((await result).get(0),/블렌더 4.1 말고 4.2/);else await assert.rejects(result,/lost a required name/);
+  }
+});
+
+test('a live-caption numeric omission gets an isolated faithful retry before failing', async () => {
+  const requests=[];
+  const translator=createLocalTranslator({fetchImpl:async(url,options)=>{
+    const payload=JSON.parse(JSON.parse(options.body).messages[1].content);requests.push(payload);
+    return localResponse([{index:requests.length===1?0:56,text:requests.length===1?'준비':requests.length<4?'100달러예요. 200달러였어요.':'100달러예요. X20은 200달러였어요. 왜인지 모르겠지만 태국에서는요.'}]);
+  }});
+  const metrics={};
+  const result=await translator.translate([{index:56,start:214.806,end:220.806,text:"100 bucks. X20 cost 200 bucks. I don't know for what reason, but for me, in Thailand, it cost"}],{},metrics);
+  assert.match(result.get(56),/X20은 200/);assert.equal(metrics.factRepairSegments,1);
+  assert.equal(requests.at(-1).segments.length,1);assert.equal(metrics.localRequests,3);
+});
+
+test('large-number conversion preserves quantity instead of literal coefficients', async () => {
+  for(const [source,text] of [
+    ['He used over 30 billion tokens.','300억 토큰 넘게 썼어요.'],
+    ['He used 1.5 million tokens.','150만 토큰을 썼어요.'],
+    ['He used 150 million tokens.','1.5억 토큰을 썼어요.'],
+    ['He used 30 billion tokens.','30000000000 토큰을 썼어요.'],
+    ['He used 30 billion.','300억을 썼어요.'],
+  ]) {
+    // Warm-up has a fixed index, unlike the original failing live segment.
+    const real=createLocalTranslator({fetchImpl:async(_url,options)=>{
+      const payload=JSON.parse(JSON.parse(options.body).messages[1].content);
+      return localResponse(payload.segments.map(s=>({index:s.index,text:s.text==='Ready.'?'준비':text})));
+    }});
+    assert.equal((await real.translate([{index:75,start:262.298,end:271.378,text:source}])).get(75),text);
+  }
+});
+
+test('wrong large-number scaling cannot pass by retaining the source digits', async () => {
+  for(const text of ['30억 토큰을 썼어요.','30 토큰을 썼어요.','3억 토큰을 썼어요.']) {
+    const translator=createLocalTranslator({fetchImpl:async(_url,options)=>{
+      const payload=JSON.parse(JSON.parse(options.body).messages[1].content);
+      return localResponse(payload.segments.map(s=>({index:s.index,text:s.text==='Ready.'?'준비':text})));
+    }});
+    await assert.rejects(translator.translate([{index:75,start:0,end:9,text:'He used 30 billion tokens.'}]),/lost a number/);
+  }
+});
+
+test('non-Korean translation and repair prompts respect the requested language', async () => {
+  const messages=[];
+  const translator=createLocalTranslator({fetchImpl:async(url,options)=>{
+    const body=JSON.parse(options.body);messages.push(body.messages);
+    return localResponse([{index:0,text:messages.length===1?'준비':messages.length===2?'Do not turn off the power before saving version 3.1.':'Save 3.1 before turning off.'}]);
+  }});
+  const result=await translator.translate([{index:0,start:0,end:2,text:'버전 3.1 저장 전에 전원을 끄지 마세요.'}],{targetLang:'en'});
+  assert.equal(result.get(0),'Save 3.1 before turning off.');
+  assert.equal(messages.length,3);
+  for(const pair of messages.slice(1)){
+    assert.equal(JSON.parse(pair[1].content).target_language,'en');
+    assert.doesNotMatch(pair[0].content,/한국어|Korean/);
+  }
+});
+
+test('local provider failures and malformed output do not invoke an external provider', async () => {
+  const calls=[];const offline=createLocalTranslator({fetchImpl:async url=>{calls.push(url);throw new Error('connection refused');}});
+  await assert.rejects(offline.translate([{index:0,start:0,end:3,text:'Hello'}]),/Local Gemma translation unavailable/);
+  assert.equal(calls.length,1);assert.ok(calls.every(url=>url.startsWith('http://127.0.0.1:11434/')));
+  for(const content of ['not json','{"translations":[]}','{"translations":[{"index":0,"text":"A"},{"index":0,"text":"B"}]}']){
+    let count=0;const translator=createLocalTranslator({fetchImpl:async()=>++count===1?localResponse([{index:0,text:'준비'}]):new Response(JSON.stringify({message:{content}}))});
+    await assert.rejects(translator.translate([{index:0,start:0,end:3,text:'Hello'}]),/invalid|omitted/);
+  }
+});
+
+test('a stray unsupported script is retranslated before it can stop Supertonic', async () => {
+  let calls=0;
+  const translator=createLocalTranslator({fetchImpl:async()=>localResponse([{index:0,text:++calls===1?'준비':calls===2?'좋아요. ქ':'좋아요.'}])});
+  const metrics={};
+  assert.equal((await translator.translate([{index:0,start:0,end:4,text:'Okay.'}],{},metrics)).get(0),'좋아요.');
+  assert.equal(metrics.lengthRepairSegments,1);assert.equal(calls,3);
+});
+
+test('neighboring versions and achieved outcomes cannot replace a short caption or expectation', async () => {
+  for(const [source,bad,good] of [
+    ['Okay. Here we go.','Opus 5.5가 블렌더 파일을 만들었어요.','자, 시작하죠.'],
+    ['I thought all tests would be ready.','테스트가 모두 준비됐어요.','테스트가 준비될 줄 알았어요.'],
+  ]){
+    let count=0;
+    const translator=createLocalTranslator({fetchImpl:async()=>localResponse([{index:0,text:++count===1?'준비':count===2?bad:good}])});
+    assert.equal((await translator.translate([{index:0,start:0,end:5,text:source,contextAfter:'Opus 5.5 created a Blender file.'}])).get(0),good);
+  }
+});
+
+test('an audience choice question stays a question instead of becoming a recommendation', async () => {
+  let count=0;
+  const translator=createLocalTranslator({fetchImpl:async()=>localResponse([{index:0,text:++count===1?'준비':count===2?'A 또는 B가 낫습니다.':'A와 B 중 뭐가 나을까요?'}])});
+  const output=await translator.translate([{index:0,start:0,end:7,text:'It is better to use A or rely on B.',contextBefore:'Let me know in the comments what you think.'}]);
+  assert.match(output.get(0),/\?$/);
+});
+
+test('serverless routes refuse local provider selection instead of reverting to Z.ai', async () => {
+  const saved=process.env.TRANSLATION_PROVIDER;
+  try{process.env.TRANSLATION_PROVIDER='ollama';const {prepareDub}=await import('../lib/dub-core.js');
+    await assert.rejects(prepareDub({videoId:'local-route-fixture',segments:[{index:0,start:0,end:4,text:'No cloud fallback'}],settings:{ttsProvider:'mock-wav'}}),/requires the local backend/);
+  }finally{if(saved===undefined)delete process.env.TRANSLATION_PROVIDER;else process.env.TRANSLATION_PROVIDER=saved;}
 });

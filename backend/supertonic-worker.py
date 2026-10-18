@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import time
 import uuid
+import runpy
+trim_speech_file = runpy.run_path(str(Path(__file__).with_name('trim-speech.py')))['trim_speech_file']
 
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8")
@@ -50,9 +52,10 @@ for line in sys.stdin:
             wav, duration = tts.synthesize(text, voice_style=styles[voice], lang=request.get("language", "ko"),
                                            total_steps=8, speed=speed, verbose=False)
             tts.save_audio(wav, str(temporary))
+            trimmed_duration = trim_speech_file(temporary)
         os.replace(temporary, output)
         reply({"id": request["id"], "ok": True, "model": "supertonic-3", "voice": voice,
-               "duration": float(np.asarray(duration).reshape(-1)[0]),
+               "duration": trimmed_duration,
                "synthesisMs": round((time.perf_counter()-started)*1000)})
     except Exception as error:
         reply({"id": request.get("id"), "ok": False, "error": str(error)})
