@@ -1,6 +1,6 @@
 # Windows 자동 설치
 
-MP4·웹영상 지원 v0.7.0의 PR이 main에 병합되기 전에는 [v0.7.0 작업 브랜치 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/generic-video-dubbing.zip)을 사용한다.
+MP4·웹영상 지원 v0.7.0과 자동 설치기는 [main ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)에 포함되어 있다. 아래 설치 순서대로 전체 ZIP을 사용한다.
 
 ZIP을 **압축 해제한 뒤 프로젝트 맨 위의 `install-windows.cmd`를 더블클릭**한다. 기본값은 GPU 자동 선택이다. 기존 수동 설치 명령을 하나씩 실행할 필요가 없다. 음성 생성 속도는 **Supertonic 3에서 1.15배**, 일반 1배속 영상의 더빙 재생 속도는 1배로 유지한다.
 
@@ -90,7 +90,7 @@ flowchart TD
 
 2026-10-18 확인 결과:
 
-- `npm run test:cloud`: JavaScript 구문 35개, 회귀 검사 54개, Windows 설치 흐름 검사 13개, 모의 번역·음성 계약 통과.
+- v0.7.0 `npm run test:cloud`: JavaScript 구문 40개, 회귀 검사 67개, Windows 설치 흐름 검사 13개, 모의 번역·음성 계약 통과.
 - `python scripts/test-setup-models.py`: 모델 준비 도구 검사 4개 통과. 모델 호출은 대역으로 대체했으며 실제 다운로드 검사가 아니다.
 - 현재 PC에서 Windows PowerShell 5.1의 `-Plan` 실행: 도구 5종과 NVIDIA 여유 메모리 조회 성공. 프로젝트 외부 디렉터리에서 시작해도 동작 확인.
 - 별도 임시 코드 폴더의 실제 Node 서버로 설치 식별자와 모델 미준비 상태를 확인. 기존 서버와 개인 환경 파일은 사용하지 않음.

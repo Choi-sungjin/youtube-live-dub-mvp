@@ -1,6 +1,10 @@
 # Local Live Dub · v0.7.0
 
-v0.7.0 PR 병합 전에는 [MP4·웹영상 지원 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/generic-video-dubbing.zip)을 사용하세요. 아래 main 다운로드는 PR이 병합되기 전까지 이전 배포본입니다.
+[**MP4·웹영상 지원 + Windows 자동 설치 ZIP 다운로드**](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip) · [설치 순서](docs/auto-install-windows.md)
+
+![MP4·웹영상 선택, 로컬 번역·1.15배 음성 생성, 재생 조작과 자동 설치 흐름](docs/assets/local-live-dub-v0.7.0.gif)
+
+Remotion으로 만든 17초 사용 안내 GIF입니다. 실제 재생 녹화나 속도 측정 결과는 아니며, [실제 Chrome 검증 기록](docs/workflows/mp4-web-v0.7.0.md)과 [GIF 제작 소스·재생성 방법](docs/readme-demo/README.md)을 별도로 제공합니다.
 
 유튜브의 원문 자막 또는 로컬 음성 인식 결과를 한국어로 번역하고, 영상 시간에 맞춰 더빙 음성을 재생하는 Chrome Manifest V3 확장 프로그램입니다. 현재 기본 경로는 **로컬 Gemma 4 E4B 번역 → Supertonic 3 음성 생성(1.15배)**입니다.
 

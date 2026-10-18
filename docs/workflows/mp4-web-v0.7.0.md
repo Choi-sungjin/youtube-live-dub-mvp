@@ -1,5 +1,7 @@
 # MP4 · 일반 웹영상 더빙 — v0.7.0
 
+[README 사용 안내 GIF](../assets/local-live-dub-v0.7.0.gif)는 Remotion으로 제작한 17초·960×600 애니메이션이다. 파일/주소 선택, 로컬 모델 처리, 시작·정지·탐색, Windows 자동 설치를 설명하며 실제 녹화나 지연 시간 측정 자료가 아니다. [제작 소스와 렌더 명령](../readme-demo/README.md)을 함께 보관한다. 아래 실제 검사 기록과 구분한다.
+
 ## 지원 범위와 사용 순서
 
 Windows에서 `install-windows.cmd`로 설치한다. 기존 GPU/CPU 자동 선택, Gemma 사전 로드, Supertonic **생성 속도 1.15배**를 유지한다. 설치가 끝나면 `http://127.0.0.1:18789/player`가 열린다. 다음 실행은 `start-player.cmd`다.
