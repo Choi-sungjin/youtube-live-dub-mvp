@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11,7 +11,7 @@
       <header class="popup-header">
         <div>
           <h1>Live Dub MVP</h1>
-          <p>v0.6.0</p>
+          <p>v0.7.0</p>
         </div>
         <span class="status-chip" data-status>checking</span>
       </header>
@@ -24,6 +24,11 @@
 
       <section class="details" data-details>
         Open a YouTube watch page first.
+      </section>
+      <section class="media-actions">
+        <button class="primary" type="button" data-player>MP4 · 웹영상 플레이어 열기</button>
+        <button type="button" data-find-video>현재 페이지 영상 찾기</button>
+        <div data-videos aria-live="polite">공개 MP4를 로컬 플레이어로 가져옵니다.</div>
       </section>
     </main>
     <script src="popup.js"></script>

@@ -1,8 +1,18 @@
-# YouTube Live Dub MVP · v0.6.1
+# Local Live Dub · v0.7.0
+
+v0.7.0 PR 병합 전에는 [MP4·웹영상 지원 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/generic-video-dubbing.zip)을 사용하세요. 아래 main 다운로드는 PR이 병합되기 전까지 이전 배포본입니다.
 
 유튜브의 원문 자막 또는 로컬 음성 인식 결과를 한국어로 번역하고, 영상 시간에 맞춰 더빙 음성을 재생하는 Chrome Manifest V3 확장 프로그램입니다. 현재 기본 경로는 **로컬 Gemma 4 E4B 번역 → Supertonic 3 음성 생성(1.15배)**입니다.
 
-**다른 PC에서 처음 설치한다면 [Windows 설치 안내](docs/install-windows.md)를 먼저 따르세요.** Chrome 확장과 같은 PC의 로컬 서버·모델이 모두 필요합니다. 최신 수정본을 GitHub에 반영하는 방법과 전달용 설명은 [GitHub 게시 안내](docs/publish-github.md)에 있습니다. 현재 지원 대상은 YouTube 일반 영상이며, SNS 확장은 프로토타입 단계입니다.
+**다른 PC에서 처음 설치한다면 [Windows 자동 설치 안내](docs/auto-install-windows.md)를 먼저 따르세요.** 같은 PC의 로컬 서버·모델이 필요합니다. YouTube 확장에 더해 **MP4 파일과 공개 MP4 웹영상**을 로컬 플레이어에서 지원합니다. 로그인 전용·DRM·HLS·blob 스트림과 SNS 전체 지원은 포함하지 않습니다.
+
+## MP4 · 일반 웹영상
+
+설치 후 **`start-player.cmd`**를 실행하거나 [로컬 플레이어](http://127.0.0.1:18789/player)를 엽니다. MP4 파일을 선택하거나 공개 MP4 주소를 넣고 **웹영상 열기 → 더빙 시작**을 누릅니다. MP4가 하나 포함된 정적 HTML 페이지 주소도 받을 수 있습니다. JavaScript로 만들어진 영상 주소는 확장 팝업의 **현재 페이지 영상 찾기 → 영상 가져오기**로 로컬 플레이어에 전달합니다. 원래 웹페이지 안에서 직접 더빙하는 방식은 아닙니다.
+
+파일은 최대 **512 MB / 30분**, Chrome에서 재생 가능한 H.264/AAC MP4를 권장합니다. 첫 시작은 전체 음성 인식 후 현재 30초 구간을 준비합니다. 현재 위치보다 20초 앞에서 다음 구간을 미리 준비하고, 부족하면 영상이 기다린 뒤 이어집니다. 긴 음성은 마지막 음절까지 기다리므로 영상 총 시청 시간이 늘어날 수 있습니다. 음성 생성 **1.15배**는 고정이며 추가 속도 압축은 없습니다.
+
+입력·사용법·제한과 실제 검사 결과는 [MP4·웹영상 워크플로우](docs/workflows/mp4-web-v0.7.0.md)에 있습니다. 기존 YouTube의 사용법은 아래와 같습니다.
 
 **Windows 자동 설치:** 전체 ZIP을 압축 해제한 뒤 **`install-windows.cmd`를 더블클릭**하면 필수 도구·모델 다운로드, GPU/CPU 선택, 로컬 설정과 서버 시작을 진행합니다. 기본 음성 1.15배를 유지합니다. [자동 설치 포함 최신 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)와 [자동 설치 안내](docs/auto-install-windows.md)를 참고하세요. Chrome에서 `extension` 폴더를 불러오는 단계는 마지막에 직접 수행합니다.
 
@@ -23,7 +33,7 @@ cd "$env:USERPROFILE\youtube-live-dub-mvp"
 
 1. 크롬의 `chrome://extensions`에서 기존 확장을 새로고침하거나, 개발자 모드의 압축해제 확장 불러오기로 `extension/` 폴더를 선택합니다.
 2. 유튜브 영상을 새로고침합니다. 패널이 숨겨졌다면 확장 아이콘에서 Open을 선택합니다.
-3. 패널 버전 **0.6.1**, Backend **http://127.0.0.1:18789**를 확인합니다.
+3. 패널 버전 **0.7.0**, Backend **http://127.0.0.1:18789**를 확인합니다.
 4. 기본 음성 엔진 **Supertonic 3 · 로컬 음성 · 1.15배**에서 **Test**, **Start** 순서로 확인합니다.
 5. 자동 서버 시작을 쓰려면 [native host 설치 안내](native-host/README.md)를 참고합니다. 수동 서버 실행 상태에서는 설치 없이 백엔드 연결이 가능합니다.
 
@@ -40,7 +50,7 @@ OLLAMA_MODEL=gemma4:e4b-it-q4_K_M
 TTS_PROVIDER=supertonic3
 ```
 
-최신 결과는 [24분 영상 후반 재생·SNS 확장 워크플로우](docs/workflows/live-dub-24min-and-sns-2026-10-18.md)에 보관합니다. 5:50부터 끝까지의 재생 범위, v12 문맥·발음 보정, 실제 시작·정지·탐색 지연과 남은 불확실성을 구분했습니다. [SNS 설계 결정서](docs/architecture/ADR-001-cross-platform-local-dubbing.md)의 공통 코어는 아직 사이트별 제품에 연결하지 않은 프로토타입입니다. 기존 [19분 전체 영상 검사](docs/workflows/live-dub-full-video-2026-10-18.md)와 [로컬 Gemma 전환 기록](docs/workflows/live-dub-local-gemma-2026-10-18.md)도 보존합니다. 이미 확장 0.6.1이면 이번 백엔드 v12 변경 때문에 추가 새로고침할 필요는 없습니다.
+이전 YouTube 검사는 [24분 영상 후반 재생·SNS 확장 워크플로우](docs/workflows/live-dub-24min-and-sns-2026-10-18.md)에 보관합니다. [SNS 설계 결정서](docs/architecture/ADR-001-cross-platform-local-dubbing.md)의 캡처 경로는 여전히 프로토타입이며, v0.7.0은 MP4 파일을 먼저 확보하는 별도 VOD 플레이어로 연결했습니다. 기존 [19분 전체 영상 검사](docs/workflows/live-dub-full-video-2026-10-18.md)와 [로컬 Gemma 전환 기록](docs/workflows/live-dub-local-gemma-2026-10-18.md)도 보존합니다. v0.7.0 팝업을 사용하려면 Chrome 확장을 새로고침하세요.
 
 새 PC에서는 [설치 안내](docs/install-windows.md)의 Python 3.12 가상환경·패키지·세 모델 다운로드·GPU/CPU 설정을 모두 준비하세요. 기존 PC의 전역 Python 패키지에 의존하지 않습니다. 모델은 최초 설정 때 다운로드하고, 서버 실행 중에는 자동 다운로드하지 않습니다.
 

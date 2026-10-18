@@ -1,4 +1,4 @@
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const YOUTUBE_WATCH_RE = /^https:\/\/(www\.)?youtube\.com\/watch\b|^https:\/\/youtube\.com\/watch\b/;
 
 const els = {};
@@ -13,9 +13,53 @@ document.addEventListener("DOMContentLoaded", () => {
   els.open.addEventListener("click", () => runCommand("YLD_PANEL_SHOW"));
   els.close.addEventListener("click", () => runCommand("YLD_PANEL_HIDE"));
   els.toggle.addEventListener("click", () => runCommand("YLD_PANEL_TOGGLE"));
+  document.querySelector('[data-player]').onclick = () => openLocalPlayer();
+  document.querySelector('[data-find-video]').onclick = findPageVideos;
 
   refreshStatus();
 });
+
+async function openLocalPlayer(url = '') {
+  const target = `http://127.0.0.1:18789/player${url ? '#url=' + encodeURIComponent(url) : ''}`;
+  await chrome.tabs.create({ url: target });
+}
+
+async function findPageVideos() {
+  const output = document.querySelector('[data-videos]');
+  output.textContent = '영상 주소를 확인하고 있습니다…';
+  try {
+    const tab = await getActiveTab();
+    if (!/^https?:\/\//.test(tab.url || '')) throw new Error('일반 웹페이지에서 사용하세요.');
+    const results = await chrome.scripting.executeScript({ target:{tabId:tab.id}, func:() =>
+      [...document.querySelectorAll('video')].map(video => ({
+        url: video.currentSrc || video.src || video.querySelector('source')?.src || '',
+        duration: Number.isFinite(video.duration) ? Math.round(video.duration) : null
+      }))
+    });
+    const videos = results.flatMap(result => result.result || []);
+    const unique = [...new Map(videos.filter(v => /^https:\/\//i.test(v.url)).map(v => [v.url,v])).values()];
+    output.textContent = '';
+    if (!unique.length) {
+      output.textContent = videos.some(v => v.url.startsWith('blob:'))
+        ? 'blob/HLS/DRM 스트림은 아직 지원하지 않습니다. 내려받을 수 있는 MP4 파일을 선택하세요.'
+        : '이 페이지에서 공개 영상 주소를 찾지 못했습니다. 직접 MP4 주소나 파일을 플레이어에서 열어주세요. iframe 안의 영상은 해당 영상 페이지를 직접 여세요.';
+      return;
+    }
+    unique.forEach((video,index) => {
+      const button = document.createElement('button');
+      button.textContent = `영상 ${index+1}${video.duration ? ' · '+video.duration+'초' : ''} 가져오기`;
+      button.title = video.url;
+      button.onclick = async () => {
+        await chrome.scripting.executeScript({target:{tabId:tab.id},func:(url)=>{
+          for (const video of document.querySelectorAll('video')) if ((video.currentSrc || video.src || video.querySelector('source')?.src)===url) video.pause();
+        },args:[video.url]});
+        await openLocalPlayer(video.url);
+      };
+      output.append(button);
+    });
+    const note=document.createElement('small');note.textContent='로컬 플레이어에서 불러오기를 누르세요. 공개 MP4인지 서버에서 확인합니다.';output.append(note);
+  } catch(error) { output.textContent=error.message || String(error); }
+}
 
 async function refreshStatus() {
   try {

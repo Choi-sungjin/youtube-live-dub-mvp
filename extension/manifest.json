@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Live Dub MVP",
-  "description": "Developer-mode control panel for preparing and syncing dubbed audio on YouTube watch pages.",
-  "version": "0.6.1",
+  "description": "Local Korean dubbing for YouTube, MP4 files and public MP4 web videos. Supertonic 3 speech at 1.15x.",
+  "version": "0.7.0",
   "permissions": [
     "activeTab",
     "scripting",

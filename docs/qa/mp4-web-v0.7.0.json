@@ -1,0 +1,92 @@
+{
+  "version": "0.7.0",
+  "verifiedAt": "2026-10-18T04:17:57.186Z",
+  "method": "Actual Chrome UI with local Whisper, Gemma and Supertonic; metrics read from visible player UI",
+  "mp4": {
+    "source": "Owned 72-second English H.264/AAC fixture",
+    "finalState": {
+      "status": "ended",
+      "error": "",
+      "active": false,
+      "currentTime": 72,
+      "videoPaused": true,
+      "audioPaused": true,
+      "audioTime": 0,
+      "audioRate": 1,
+      "speechSpeed": 1.15,
+      "videoVolume": 1,
+      "sourceText": "",
+      "translatedText": "",
+      "bufferedUntil": 72,
+      "bufferWaits": 0,
+      "bufferMs": 3052,
+      "tailWaits": 5,
+      "seeks": 0,
+      "audioStarts": 10,
+      "firstAudioMs": 3096
+    }
+  },
+  "web": {
+    "page": "https://www.w3.org/2010/05/video/mediaevents.html",
+    "source": "https://media.w3.org/2010/05/sintel/trailer.mp4",
+    "finalState": {
+      "status": "ended",
+      "error": "",
+      "active": false,
+      "currentTime": 52.21,
+      "videoPaused": true,
+      "audioPaused": true,
+      "audioTime": 0,
+      "audioRate": 1,
+      "speechSpeed": 1.15,
+      "videoVolume": 1,
+      "sourceText": "",
+      "translatedText": "",
+      "bufferedUntil": 52.208333,
+      "bufferWaits": 0,
+      "bufferMs": 1183,
+      "tailWaits": 2,
+      "seeks": 7,
+      "audioStarts": 3,
+      "firstAudioMs": 1211
+    }
+  },
+  "rapidSeekPause": [
+    {
+      "status": "paused",
+      "active": true,
+      "error": "",
+      "seeks": 3,
+      "videoPaused": true,
+      "audioPaused": true
+    },
+    {
+      "status": "paused",
+      "active": true,
+      "error": "",
+      "seeks": 5,
+      "videoPaused": true,
+      "audioPaused": true
+    },
+    {
+      "status": "paused",
+      "active": true,
+      "error": "",
+      "seeks": 7,
+      "videoPaused": true,
+      "audioPaused": true
+    }
+  ],
+  "actualApiSpeechCheck": {
+    "uniqueClips": 10,
+    "speechSpeed": 1.15,
+    "ttsModel": "supertonic-3",
+    "positiveDurations": true
+  },
+  "limits": {
+    "newPcInstallationVerified": false,
+    "toolbarPopupVerified": false,
+    "networkStall": "covered by fixture test, not physically induced",
+    "scope": "MP4 files and public MP4 web video; not DRM, authenticated streams, HLS/blob or live video"
+  }
+}

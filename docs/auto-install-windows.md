@@ -1,5 +1,7 @@
 # Windows 자동 설치
 
+MP4·웹영상 지원 v0.7.0의 PR이 main에 병합되기 전에는 [v0.7.0 작업 브랜치 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/generic-video-dubbing.zip)을 사용한다.
+
 ZIP을 **압축 해제한 뒤 프로젝트 맨 위의 `install-windows.cmd`를 더블클릭**한다. 기본값은 GPU 자동 선택이다. 기존 수동 설치 명령을 하나씩 실행할 필요가 없다. 음성 생성 속도는 **Supertonic 3에서 1.15배**, 일반 1배속 영상의 더빙 재생 속도는 1배로 유지한다.
 
 자동 설치가 포함된 최신 버전은 [main ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)에서 받는다. 비공개 저장소이므로 접근 권한이 있는 GitHub 계정으로 로그인한다. 설치 파일 하나만 받으면 필요한 소스와 requirements가 없으므로 전체 ZIP을 받는다.
@@ -10,7 +12,8 @@ ZIP을 **압축 해제한 뒤 프로젝트 맨 위의 `install-windows.cmd`를 �
 2. `install-windows.cmd`를 실행한다. 도구 설치에 필요한 Windows 관리자 승인 창이 뜨면 확인한다. 별도의 관리자 계정으로 실행하면 모델·설정이 그 계정에 저장되므로 평소 사용하는 계정에서 시작한다.
 3. 도구와 모델 다운로드, 검사, 서버 준비가 끝나 **SETUP COMPLETE**가 표시될 때까지 기다린다. 여러 GB를 다운로드하므로 네트워크·PC 사양에 따라 오래 걸릴 수 있다.
 4. 열린 Chrome 확장 관리 화면에서 **개발자 모드 → 압축해제된 확장 프로그램 로드 → 이 프로젝트의 `extension` 폴더**를 선택한다. 이 마지막 등록 단계는 사용자가 직접 수행한다.
-5. YouTube에서 패널의 **Test → Start → Stop → 앞뒤 구간 이동**을 확인한다.
+5. 함께 열린 **MP4·웹영상 플레이어**에서 파일을 선택하거나 공개 MP4 주소를 입력한다. **더빙 시작 → 일시정지 → 재개 → 앞뒤 이동 → 정지**를 확인한다. 이 플레이어는 Chrome 확장을 등록하지 않아도 쓸 수 있다.
+6. YouTube에서는 확장 패널의 **Test → Start → Stop → 앞뒤 구간 이동**을 확인한다.
 
 Microsoft Store의 **앱 설치 관리자(App Installer/WinGet)**가 필요하다. 없으면 설치기가 [공식 WinGet 안내](https://aka.ms/getwinget)를 표시하고 중단한다. 앱 설치 관리자를 설치·업데이트한 뒤 같은 파일을 다시 실행한다. 시스템 실행 정책은 변경하지 않으며 CMD 실행기는 해당 PowerShell 프로세스에만 `ExecutionPolicy Bypass`를 사용한다. 회사 정책이나 Windows 차단을 우회하지 않는다.
 
@@ -26,7 +29,7 @@ Microsoft Store의 **앱 설치 관리자(App Installer/WinGet)**가 필요하�
 | 음성 인식 | CUDA 성공 시 `large-v3-turbo / int8_float16`, 그 외 자동 모드에서는 `small / CPU int8` |
 | 설정 | `backend/.env`의 로컬 번역·TTS·STT 설정 작성. 기존 파일은 `.cache`에 백업하고 관련 없는 설정과 키 보존 |
 | 완료 확인 | 서버를 숨김 창으로 시작하고 Gemma·Supertonic·Whisper가 모두 준비됐는지 최대 10분 확인 |
-| 마지막 안내 | Chrome 진단/확장 화면과 `extension` 폴더 열기 |
+| 마지막 안내 | Chrome MP4·웹영상 플레이어/확장 화면과 `extension` 폴더 열기 |
 
 WinGet 설치는 [Microsoft 공식 install 옵션](https://learn.microsoft.com/en-us/windows/package-manager/winget/install)을 사용하며 패키지·소스 약관 수락 옵션을 포함한다. 다운로드 해시 검사와 Windows 보호 기능은 끄지 않는다. 모델은 각 도구의 로컬 캐시에 보관하며 GitHub에 업로드하지 않는다.
 
@@ -60,7 +63,7 @@ WinGet 설치는 [Microsoft 공식 install 옵션](https://learn.microsoft.com/e
 
 `backend/.cache/install-result.json`은 성공한 설치 실행의 기록이다. 현재 서버 상태는 `http://127.0.0.1:18789/api/health`로 확인한다. HTTP의 `ok: true`만으로 완료하지 않으며 세 모델의 ready와 선택한 모델·엔진이 일치해야 한다. 실패 로그는 `.cache/setup-server-*.err.log`, Ollama 시작 로그는 `.cache/ollama-*.err.log`에 있다. API 키·기존 환경 파일 내용을 로그에 출력하지 않는다. 기존 설정 백업에는 개인 값이 있을 수 있으므로 `.cache` 전체를 공유하지 않는다.
 
-PC를 재부팅한 뒤에는 `scripts/start-local.ps1`로 서버를 다시 시작한다. 필요하면 [수동 설치 안내의 native host 등록](install-windows.md#8-선택-사항-크롬에서-서버-자동-시작)을 추가할 수 있다. 이 설치기는 로그인 시 자동 실행이나 Chrome native host 등록을 추가하지 않는다.
+PC를 재부팅한 뒤에는 **`start-player.cmd`**를 실행한다. Ollama와 서버를 시작하고 로컬 플레이어를 연다. 모델이 메모리에 올라오는 동안 첫 요청은 기다릴 수 있다. 이전 버전 서버가 실행 중이면 자동으로 다른 서버를 종료하지 않고 안내한다. 필요하면 [수동 설치 안내의 native host 등록](install-windows.md#8-선택-사항-크롬에서-서버-자동-시작)을 추가할 수 있다. 이 설치기는 로그인 시 자동 실행이나 Chrome native host 등록을 추가하지 않는다.
 
 ## 자동 설치 흐름
 
@@ -76,6 +79,7 @@ flowchart TD
   G --> I[기존 설정 백업 · 로컬 설정 저장]
   H --> I
   I --> J[서버 시작 · 세 모델 ready 확인]
+  J --> M[MP4·웹영상 플레이어 · 파일 또는 공개 URL]
   J --> K[사용자가 Chrome에 extension 폴더 등록]
   K --> L[유튜브 Test · Start · Stop · 탐색]
 ```
