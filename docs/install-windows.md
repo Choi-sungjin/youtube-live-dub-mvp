@@ -4,7 +4,7 @@
 
 기준 구성: 로컬 Gemma 4 E4B 번역, Supertonic 3 음성 생성 **1.15배**, 자막이 없을 때 faster-whisper 음성 인식. 현재 검증 대상은 YouTube 일반 동영상 페이지다. 다른 SNS는 설계·프로토타입 단계다.
 
-> 최신 수정본은 [codex/dub-supertonic-cloud-sync 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/codex/dub-supertonic-cloud-sync)에서 받는다. 게시·업데이트 절차는 [GitHub 게시 안내](publish-github.md)를 따른다. 현재 PC의 미커밋 파일은 다른 PC의 clone에 포함되지 않는다.
+> 최신 배포 코드는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main) 또는 [소스 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)로 받는다. 게시·업데이트 절차는 [GitHub 게시 안내](publish-github.md)를 따른다. 모델·캐시·API 키·개인 환경 설정은 다운로드에 포함되지 않는다.
 
 ## 1. 준비물
 
@@ -32,22 +32,15 @@ ffmpeg -version
 
 ## 2. 코드 받기
 
-**현재 최신 수정본이 있는 브랜치를 지정해서 받는다.** 저장소는 Private이므로 권한 있는 GitHub 계정으로 인증한다.
+**main 브랜치의 최신 배포 코드를 받는다.** 저장소는 Private이므로 권한 있는 GitHub 계정으로 인증한다.
 
 ```powershell
 cd $env:USERPROFILE
-git clone --branch codex/dub-supertonic-cloud-sync https://github.com/Choi-sungjin/youtube-live-dub-mvp.git
+git clone --branch main https://github.com/Choi-sungjin/youtube-live-dub-mvp.git
 cd youtube-live-dub-mvp
 ```
 
-추후 게시자가 최신 수정본을 main에 반영했다고 확인한 경우에는 아래 기본 브랜치 명령도 사용할 수 있다.
-
-```powershell
-git clone https://github.com/Choi-sungjin/youtube-live-dub-mvp.git
-cd youtube-live-dub-mvp
-```
-
-두 clone 방법 중 하나만 실행한다. 같은 폴더가 이미 있다면 덮어쓰지 않고 기존 설치의 상태를 확인한다. Git을 쓰지 않으면 GitHub의 **Code → Download ZIP**으로 지정한 브랜치를 받아 압축을 풀어도 되지만, 이후 `git pull` 업데이트는 사용할 수 없다.
+같은 폴더가 이미 있다면 덮어쓰지 않고 기존 설치의 상태를 확인한다. Git을 쓰지 않으면 [main 소스 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)을 받아 압축을 푼 뒤 프로젝트 폴더에서 PowerShell을 연다. ZIP 설치는 이후 `git pull` 업데이트를 사용할 수 없다.
 
 ## 3. Python 패키지 설치
 
@@ -169,10 +162,18 @@ node backend/server.js
 
 ## 업데이트
 
-Chrome 패널에서 Stop을 누르고 서버를 정상 종료한 뒤, 설치한 브랜치에서 업데이트한다.
+Chrome 패널에서 Stop을 누르고 서버를 정상 종료한 뒤, main 브랜치에서 업데이트한다.
 
 ```powershell
 git status --short
+git pull --ff-only
+```
+
+이전 안내에 따라 `codex/dub-supertonic-cloud-sync` 브랜치를 받은 경우에는 `git status --short` 결과가 비어 있는지 확인한 뒤 아래 명령으로 main으로 전환한다. 변경 파일이 있으면 먼저 보존하고 확인하며, 강제 전환하지 않는다.
+
+```powershell
+git fetch origin
+git switch main
 git pull --ff-only
 ```
 

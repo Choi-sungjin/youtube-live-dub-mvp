@@ -1,8 +1,8 @@
 # GitHub 게시와 다른 PC 배포
 
-2026-10-18 확인: 기존 origin은 [Choi-sungjin/youtube-live-dub-mvp](https://github.com/Choi-sungjin/youtube-live-dub-mvp), 원격 기본 브랜치는 `main`, 현재 작업 브랜치는 `codex/dub-supertonic-cloud-sync`다. 새 저장소를 만들거나 origin을 다시 추가할 필요는 없다.
+기존 origin은 [Choi-sungjin/youtube-live-dub-mvp](https://github.com/Choi-sungjin/youtube-live-dub-mvp), 원격 기본·배포 브랜치는 `main`이다. 새 저장소를 만들거나 origin을 다시 추가할 필요는 없다. v0.6.1의 변경 내용은 [PR #1](https://github.com/Choi-sungjin/youtube-live-dub-mvp/pull/1)에서 확인한다.
 
-최신 수정본의 배포 대상은 [codex/dub-supertonic-cloud-sync 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/codex/dub-supertonic-cloud-sync)다. [소스 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/dub-supertonic-cloud-sync.zip) 또는 설치 안내의 브랜치 지정 clone으로 받는다. Private 저장소이므로 권한 있는 계정으로 로그인한다. main 반영은 별도 PR 검토 대상이다.
+설치자는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main) 또는 [최신 소스 ZIP](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)을 받는다. Private 저장소이므로 권한 있는 계정으로 로그인한다. [Windows 설치 안내](install-windows.md)에 실행 도구·모델·Chrome 확장 준비 순서를 정리했다.
 
 아래는 이후 업데이트에도 사용하는 게시 절차다. 로컬에서 파일을 고친 것만으로는 GitHub에 반영되지 않으며, commit과 push가 필요하다.
 
@@ -45,7 +45,7 @@ npm.cmd run test:regressions
 git diff --check
 ```
 
-현재 작업이 지정 브랜치에 있는지 확인한 뒤 소스·설치 문서를 스테이징한다.
+현재 작업이 작업 브랜치에 있는지 확인한 뒤 소스·설치 문서를 스테이징한다. 이후 변경은 새 작업 브랜치와 PR로 진행하며 main에 직접 push하지 않는다.
 
 ```powershell
 git add README.md .gitignore package.json requirements-*.txt extension backend lib api scripts native-host docs
@@ -58,16 +58,16 @@ git diff --cached --check
 
 ```powershell
 git commit -m "Prepare local dubbing and Windows installation guide"
-git push -u origin codex/dub-supertonic-cloud-sync
+git push -u origin HEAD
 ```
 
-GitHub 저장소에서 이 브랜치의 Pull Request를 만들어 검토한 뒤 `main`에 반영한다. 이미 같은 브랜치의 PR이 있다면 중복 생성하지 않고 기존 PR을 갱신한다. **main 반영 전에는 설치자에게 해당 브랜치를 지정해서 받도록 안내한다.** 절차의 근거는 [GitHub 공식 기존 코드 게시 안내](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github)다.
+GitHub 저장소에서 작업 브랜치의 Pull Request를 만들어 검토한 뒤 `main`에 반영한다. 같은 브랜치의 열린 PR이 있다면 중복 생성하지 않고 기존 PR을 갱신한다. **설치자에게는 main 링크를 제공하고, 병합 전 검증이 필요한 경우에만 해당 작업 브랜치를 안내한다.** 절차의 근거는 [GitHub 공식 기존 코드 게시 안내](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github)다.
 
 반복 설치용으로는 검증한 커밋에 태그를 붙여 Release로 안내한다. 태그가 가리키는 커밋, `package.json`과 manifest 버전이 맞는지 확인한다. 모델이나 개인 설정을 포함한 작업 폴더 전체 ZIP 대신 저장소의 소스 ZIP을 사용한다. 공개 오픈소스로 배포하려면 프로젝트 LICENSE도 별도로 결정한다. 현재 저장소에서 추적 중인 LICENSE 파일은 확인되지 않았다.
 
 ## 설치자에게 전달할 메시지
 
-> GitHub 저장소에서 지정한 브랜치/릴리스를 받아 주세요. 이 프로그램은 확장만 설치하는 방식이 아니라 Windows에 로컬 AI 서버와 모델도 준비해야 합니다. README의 **다른 PC 설치 안내**대로 Node.js·Python·FFmpeg·Ollama와 모델을 설치하고, 서버를 시작한 다음 Chrome 개발자 모드에서 **extension 폴더**를 선택하세요. 기본 번역·음성 생성에는 API 키가 필요 없으며 음성은 1.15배로 생성됩니다. GPU가 없는 경우 CPU 설치 경로를 사용하되 처리 속도와 인식 품질은 따로 확인해야 합니다.
+> GitHub 저장소의 main 또는 최신 소스 ZIP을 받아 주세요. 이 프로그램은 확장만 설치하는 방식이 아니라 Windows에 로컬 AI 서버와 모델도 준비해야 합니다. README의 **다른 PC 설치 안내**대로 Node.js·Python·FFmpeg·Ollama와 모델을 설치하고, 서버를 시작한 다음 Chrome 개발자 모드에서 **extension 폴더**를 선택하세요. 기본 번역·음성 생성에는 API 키가 필요 없으며 음성은 1.15배로 생성됩니다. GPU가 없는 경우 CPU 설치 경로를 사용하되 처리 속도와 인식 품질은 따로 확인해야 합니다.
 
 ## 게시부터 실행까지
 

@@ -4,10 +4,10 @@
 
 **다른 PC에서 처음 설치한다면 [Windows 설치 안내](docs/install-windows.md)를 먼저 따르세요.** Chrome 확장과 같은 PC의 로컬 서버·모델이 모두 필요합니다. 최신 수정본을 GitHub에 반영하는 방법과 전달용 설명은 [GitHub 게시 안내](docs/publish-github.md)에 있습니다. 현재 지원 대상은 YouTube 일반 영상이며, SNS 확장은 프로토타입 단계입니다.
 
-2026-10-18 최신 수정본 배포 브랜치: [codex/dub-supertonic-cloud-sync](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/codex/dub-supertonic-cloud-sync). [이 브랜치 소스 ZIP 받기](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/dub-supertonic-cloud-sync.zip). `main`에 합쳐지기 전에는 아래처럼 브랜치를 지정해서 받으세요. 저장소가 Private이므로 접근 권한이 있는 GitHub 계정으로 로그인해야 합니다.
+최신 배포 코드는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main)에서 받으세요. [최신 소스 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip). 저장소가 Private이므로 접근 권한이 있는 GitHub 계정으로 로그인해야 합니다. ZIP은 압축을 풀고, Git을 사용할 경우 아래 명령으로 받으세요.
 
 ```powershell
-git clone --branch codex/dub-supertonic-cloud-sync https://github.com/Choi-sungjin/youtube-live-dub-mvp.git
+git clone --branch main https://github.com/Choi-sungjin/youtube-live-dub-mvp.git
 ```
 
 ## 현재 실행 방법 (Windows)
