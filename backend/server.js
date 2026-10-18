@@ -87,6 +87,8 @@ const server = createServer(async (req, res) => {
       json(res, 200, {
         ok: true,
         version: APP_VERSION,
+        // Installer ownership marker, not an authentication credential.
+        installationId: process.env.YLD_INSTALLATION_ID || null,
         platform: process.platform,
         ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone'] : ['supertonic3', 'supertone'],
         supertonic: supertonicStatus(),

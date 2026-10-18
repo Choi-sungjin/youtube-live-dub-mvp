@@ -4,6 +4,8 @@
 
 **다른 PC에서 처음 설치한다면 [Windows 설치 안내](docs/install-windows.md)를 먼저 따르세요.** Chrome 확장과 같은 PC의 로컬 서버·모델이 모두 필요합니다. 최신 수정본을 GitHub에 반영하는 방법과 전달용 설명은 [GitHub 게시 안내](docs/publish-github.md)에 있습니다. 현재 지원 대상은 YouTube 일반 영상이며, SNS 확장은 프로토타입 단계입니다.
 
+**Windows 자동 설치:** 전체 ZIP을 압축 해제한 뒤 **`install-windows.cmd`를 더블클릭**하면 필수 도구·모델 다운로드, GPU/CPU 선택, 로컬 설정과 서버 시작을 진행합니다. 기본 음성 1.15배를 유지합니다. [자동 설치 추가본 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/codex/windows-auto-install.zip)와 [자동 설치 안내](docs/auto-install-windows.md)를 참고하세요. Chrome에서 `extension` 폴더를 불러오는 단계는 마지막에 직접 수행합니다.
+
 최신 배포 코드는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main)에서 받으세요. [최신 소스 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip). 저장소가 Private이므로 접근 권한이 있는 GitHub 계정으로 로그인해야 합니다. ZIP은 압축을 풀고, Git을 사용할 경우 아래 명령으로 받으세요.
 
 ```powershell
