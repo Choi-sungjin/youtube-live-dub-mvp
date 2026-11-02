@@ -1,7 +1,10 @@
+importScripts("page-probe.js");
+
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
 const NATIVE_HOST_NAME = "com.youtube_live_dub.backend";
 
 const MESSAGE_HANDLERS = {
+  YLD_PAGE_PROBE: executePageProbe,
   YLD_BACKEND_HEALTH: ensureBackendHealth,
   YLD_PREPARE_DUB: prepareDub,
   YLD_FETCH_CAPTIONS: fetchCaptions,
@@ -12,6 +15,33 @@ const MESSAGE_HANDLERS = {
   YLD_BACKEND_STOP: (payload) => callNativeHost("stop", payload),
   YLD_BACKEND_STATUS: (payload) => callNativeHost("status", payload),
 };
+
+async function executePageProbe(payload, sender) {
+  // Bind execution to the sender's document, never a caller-selected tab or code.
+  const url = new URL(sender?.url || "about:blank");
+  if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) ||
+      sender.frameId !== 0 || typeof sender.documentId !== "string" || !sender.documentId || url.protocol !== "https:" ||
+      !["www.youtube.com", "youtube.com"].includes(url.hostname) || url.port) {
+    throw new Error("Page probe requires a YouTube top-level content script.");
+  }
+  if (!payload || !["install", "snapshot", "fetch-transcript", "prime-captions"].includes(payload.mode) ||
+      typeof payload.requestId !== "string" || !payload.requestId || payload.requestId.length > 200 ||
+      !["ko", "en", "ja"].includes(payload.targetLang)) {
+    throw new Error("Invalid page probe request.");
+  }
+  const target = { tabId: sender.tab.id, documentIds: [sender.documentId] };
+  const results = await chrome.scripting.executeScript({
+    target,
+    world: "MAIN",
+    func: runPageProbe,
+    args: [{ requestId: payload.requestId, mode: payload.mode, targetLang: payload.targetLang }],
+  });
+  const result = results?.[0]?.result;
+  if (result?.requestId !== payload.requestId || result?.mode !== payload.mode) {
+    throw new Error("Page probe did not acknowledge the request.");
+  }
+  return result;
+}
 
 async function ensureBackendHealth(payload) {
   const backendUrl = normalizeBackendUrl(payload?.backendUrl);
@@ -35,7 +65,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   Promise.resolve()
-    .then(() => handler(message.payload))
+    .then(() => handler(message.payload, _sender))
     .then((payload) => sendResponse({ ok: true, payload }))
     .catch((error) => {
       sendResponse({

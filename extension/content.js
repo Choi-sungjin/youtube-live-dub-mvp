@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.0";
+  const BUILD_VERSION = "0.8.1";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -62,6 +62,7 @@
     transcriptExpanding: false,
     transcriptTargetDuration: 0,
     objectUrls: [],
+    pageProbeStatus: "연결 중",
     pagePlayerResponse: null,
     pagePlayerResponseVideoId: "",
     pageTranscriptEndpoint: null,
@@ -78,11 +79,11 @@
     ensurePanel();
     bindPanelEvents();
     refreshPageState();
-    installPageProbe();
     setStatus("idle");
 
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
     window.addEventListener("message", handlePageMessage);
+    installPageProbe();
     document.addEventListener("yt-navigate-finish", handleNavigation);
     window.addEventListener("popstate", handleNavigation);
     setInterval(refreshPageState, 1500);
@@ -1142,7 +1143,7 @@
       );
 
       window.addEventListener("message", onMessage);
-      injectPageProbe(requestId, "prime-captions", { targetLang: els.lang.value });
+      injectPageProbe(requestId, "prime-captions", { targetLang: els.lang.value }).then((ok) => { if (!ok) finish([]); });
       setTimeout(() => {
         const cached = state.pageTranscriptVideoId === videoId ? state.pageTranscriptSegments : [];
         finish(cached);
@@ -1586,7 +1587,7 @@
       };
 
       window.addEventListener("message", onMessage);
-      injectPageProbe(requestId, "fetch-transcript");
+      injectPageProbe(requestId, "fetch-transcript").then((ok) => { if (!ok) finish([]); });
       setTimeout(() => finish([]), 5500);
     });
   }
@@ -2647,7 +2648,7 @@
       };
 
       window.addEventListener("message", onMessage);
-      injectPageProbe(requestId, "snapshot");
+      injectPageProbe(requestId, "snapshot").then((ok) => { if (!ok) finish(null); });
       setTimeout(() => finish(null), 1800);
     });
   }
@@ -2656,15 +2657,21 @@
     injectPageProbe(`yld-install-${Date.now()}`, "install");
   }
 
-  function injectPageProbe(requestId, mode, options = {}) {
-    const script = document.createElement("script");
-    script.src = chrome.runtime.getURL("page-probe.js");
-    script.dataset.yldRequestId = requestId;
-    script.dataset.yldMode = mode || "snapshot";
-    script.dataset.yldTargetLang = options.targetLang || els.lang?.value || "";
-    (document.head || document.documentElement).appendChild(script);
-    script.addEventListener("load", () => script.remove(), { once: true });
-    script.addEventListener("error", () => script.remove(), { once: true });
+  async function injectPageProbe(requestId, mode, options = {}) {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "YLD_PAGE_PROBE",
+        payload: { requestId, mode: mode || "snapshot", targetLang: options.targetLang || els.lang?.value || "ko" },
+      });
+      if (!response?.ok) throw new Error(response?.error || "페이지 연결 응답 없음");
+      state.pageProbeStatus = "연결됨";
+      renderPlaybackDiagnostics();
+      return true;
+    } catch (error) {
+      state.pageProbeStatus = `연결 실패: ${error?.message || String(error)}`;
+      renderPlaybackDiagnostics();
+      return false;
+    }
   }
 
   function handlePageMessage(event) {
@@ -2996,6 +3003,7 @@
     const mode = media => !media ? "없음" : media.error ? "오류" : media.ended ? "완료" : media.paused ? "일시정지" : "재생 중";
     els.diagnostics.textContent = [
       '재생 코드: completed-clip-v2',
+      `유튜브 페이지 연결: ${state.pageProbeStatus}`,
       `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
       `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
       `더빙: ${finite(audio?.currentTime)} / ${finite(audio?.duration)}초 · ${mode(audio)}`,

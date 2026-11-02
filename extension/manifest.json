@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "106",
   "name": "YouTube Live Dub MVP",
   "description": "Korean video dubbing with four combinations of local Gemma translation, Supertonic voice, and optional GPT translation/voice.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "permissions": [
     "activeTab",
     "scripting",
@@ -41,17 +42,6 @@
         "content.css"
       ],
       "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "page-probe.js"
-      ],
-      "matches": [
-        "https://www.youtube.com/*",
-        "https://youtube.com/*"
-      ]
     }
   ],
   "icons": {

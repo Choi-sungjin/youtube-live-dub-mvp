@@ -1,8 +1,5 @@
-(() => {
-  const currentScript = document.currentScript;
-  const requestId = currentScript?.dataset?.yldRequestId || "";
-  const mode = currentScript?.dataset?.yldMode || "snapshot";
-  const targetLang = currentScript?.dataset?.yldTargetLang || "ko";
+// Self-contained: Chrome serializes this function into the requesting page.
+function runPageProbe({ requestId = "", mode = "snapshot", targetLang = "ko" } = {}) {
   const videoId = getVideoId();
 
   installNetworkProbe();
@@ -23,11 +20,12 @@
     fetchTranscriptFromPage(videoId)
       .then((result) => {
         window.postMessage({
+          ...result,
+          captionSource: result.source || "",
           source: "YLD_PAGE",
           type: "TRANSCRIPT_RESPONSE",
           requestId,
-          videoId,
-          ...result
+          videoId
         }, "*");
       })
       .catch((error) => {
@@ -46,11 +44,12 @@
     primeCaptionsFromPlayer(videoId, targetLang)
       .then((result) => {
         window.postMessage({
+          ...result,
+          captionSource: result.source || "",
           source: "YLD_PAGE",
           type: "CAPTIONS_PRIMED",
           requestId,
-          videoId,
-          ...result
+          videoId
         }, "*");
       })
       .catch((error) => {
@@ -64,6 +63,8 @@
         }, "*");
       });
   }
+
+  return { requestId, videoId, mode };
 
   function compactPlayerResponse(response) {
     if (!response) {
@@ -1079,4 +1080,4 @@
   function getVideoId() {
     return new URL(location.href).searchParams.get("v") || "";
   }
-})();
+}
