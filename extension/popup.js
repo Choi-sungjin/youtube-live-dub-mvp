@@ -1,9 +1,10 @@
-const VERSION = "0.7.0";
+const VERSION = chrome.runtime.getManifest().version;
 const YOUTUBE_WATCH_RE = /^https:\/\/(www\.)?youtube\.com\/watch\b|^https:\/\/youtube\.com\/watch\b/;
 
 const els = {};
 
 document.addEventListener("DOMContentLoaded", () => {
+  document.querySelector("[data-version]").textContent = `v${VERSION}`;
   els.status = document.querySelector("[data-status]");
   els.details = document.querySelector("[data-details]");
   els.open = document.querySelector("[data-open]");
@@ -98,10 +99,15 @@ async function sendPanelMessage(tabId, type, allowInject) {
     if (!response || !response.ok) {
       throw new Error(response?.error || "Panel did not respond.");
     }
+    if (response.payload?.version !== VERSION) {
+      throw new Error(`확장 v${VERSION} · 페이지 v${response.payload?.version || "확인 불가"}. 유튜브 페이지를 새로고침(F5)한 뒤 다시 열어주세요.`);
+    }
     return response;
   } catch (error) {
-    if (!allowInject || !String(error.message || "").includes("Receiving end does not exist")) {
-      throw error;
+    const disconnected = /Receiving end does not exist|Extension context invalidated|message (?:port|channel) closed/i.test(error.message || "");
+    if (!disconnected) throw error;
+    if (!allowInject) {
+      throw new Error(`확장 v${VERSION}와 페이지 연결이 끊겼습니다. 유튜브 페이지를 새로고침(F5)한 뒤 다시 열어주세요.`);
     }
     await injectContent(tabId);
     await delay(250);
@@ -122,7 +128,8 @@ function renderStatus(payload = {}) {
     `<strong>Panel:</strong> ${escapeHtml(payload.visible ? "open" : "closed")}`,
     `<strong>Dub:</strong> ${escapeHtml(payload.status || "idle")}`,
     `<strong>Video:</strong> ${escapeHtml(payload.videoId || "unknown")}`,
-    `<strong>Version:</strong> ${escapeHtml(payload.version || VERSION)}`,
+    `<strong>설치 버전:</strong> ${escapeHtml(VERSION)}`,
+    `<strong>페이지 버전:</strong> ${escapeHtml(payload.version || "확인 불가")}`,
   ].map((line) => `<div>${line}</div>`).join("");
 }
 
