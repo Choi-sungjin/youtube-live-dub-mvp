@@ -1,6 +1,6 @@
 {
   "name": "youtube-live-dub-mvp",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "backend:start": "node backend/server.js",
     "dub:preprocess": "node scripts/preprocess-dub.js",
     "verify:e2e": "node scripts/verify-live-dub-e2e.js",
-    "test:regressions": "node --test scripts/test-regressions.js scripts/test-caption-context.js scripts/test-media-session.js scripts/test-installer-health.js scripts/test-generic-media.js scripts/test-openai-modes.js scripts/test-page-probe.js scripts/test-popup-version.js",
+    "test:regressions": "node --test scripts/test-regressions.js scripts/test-caption-context.js scripts/test-media-session.js scripts/test-installer-health.js scripts/test-generic-media.js scripts/test-openai-modes.js scripts/test-page-probe.js scripts/test-popup-version.js scripts/test-speaker-voices.js",
     "test:cloud": "node scripts/test-cloud.js"
   },
   "engines": {

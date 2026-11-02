@@ -116,7 +116,7 @@ async function contentFixture(overrides = {}) {
     if (overrides.expand) { expandTranscriptCoverage=overrides.expand; cleanCaptionText=text=>String(text).trim(); }
     maybePrepareMoreAudio=()=>{};
     requestDubPrepare=overrides.prepare || (async()=>({segments:[]}));
-    bufferPreparedAudio=async()=>{};
+    bufferPreparedAudio=async items=>{ if(overrides.audio) items.forEach(item=>{item.audio=overrides.audio}); };
     buildCaptionUrls=url=>[{url,format:'json3'}]; buildYouTubeClientHeaders=()=>({});
     if (overrides.backendCaptions) fetchBackendCaptionSegments=overrides.backendCaptions;
     if (overrides.chunks) chunkSegments=()=>overrides.chunks;
@@ -558,4 +558,29 @@ test('serverless routes refuse local provider selection instead of reverting to 
   try{process.env.TRANSLATION_PROVIDER='ollama';const {prepareDub}=await import('../lib/dub-core.js');
     await assert.rejects(prepareDub({videoId:'local-route-fixture',segments:[{index:0,start:0,end:4,text:'No cloud fallback'}],settings:{ttsProvider:'mock-wav'}}),/requires the local backend/);
   }finally{if(saved===undefined)delete process.env.TRANSLATION_PROVIDER;else process.env.TRANSLATION_PROVIDER=saved;}
+});
+
+test('Start from a paused video resumes after first prepared clip; subsequent user pause stays paused', async () => {
+  const ready = deferred();
+  const f = await contentFixture({ chunks:[{index:0,start:0,end:4,text:'Hello'}], audio:fakeSpeech(2), prepare:()=>ready.promise });
+  f.video.paused = true;
+  const run = f.startDub();
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(f.video.paused,true);
+  ready.resolve({segments:[{index:0,start:0,end:4,audioDataUrl:'data:audio/wav;base64,AA=='}]});
+  try {
+    await run;
+    assert.equal(f.state.status,'ready',f.state.lastError);
+    assert.equal(f.video.paused,false,'Start must start video once dubbing is ready');
+    f.video.paused=true;f.syncAudioToVideo();assert.equal(f.video.paused,true);
+  } finally { f.stopDub({resumeVideo:false}); }
+});
+
+test('cancel or failure during startup preserves an originally paused video', async () => {
+  const captions=deferred(); const f=await contentFixture({captions:()=>captions.promise});
+  f.video.paused=true;const run=f.startDub();await new Promise(resolve=>setTimeout(resolve,0));
+  f.stopDub();captions.resolve([{start:0,end:4,text:'Late'}]);await run;
+  assert.equal(f.video.paused,true);assert.equal(f.state.running,false);
+  const failed=await contentFixture({health:async()=>{throw new Error('offline')}});
+  failed.video.paused=true;await failed.startDub();assert.equal(failed.video.paused,true);
 });

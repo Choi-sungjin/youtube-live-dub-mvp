@@ -1,3 +1,4 @@
+import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker } from './speaker-voices.js';
 import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
 import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_VOICE_MODEL, OPENAI_VOICES } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
@@ -100,6 +101,7 @@ const server = createServer(async (req, res) => {
         ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone', 'openai-realtime'] : ['supertonic3', 'supertone', 'openai-realtime'],
         dubbingModes: DUBBING_MODES,
         supertonic: supertonicStatus(),
+        speaker: speakerStatus(),
         stt: fastSttStatus(),
         localTranslation: LOCAL_TRANSLATOR.status(),
         provider: providerInfo(),
@@ -190,7 +192,7 @@ server.listen(PORT, HOST, () => {
   }
 });
 
-function closeWorkers() { clearInterval(localTranslationWarmTimer); closeFastStt(); closeSupertonic(); }
+function closeWorkers() { clearInterval(localTranslationWarmTimer); closeFastStt(); closeSupertonic(); closeSpeaker(); }
 server.on('close', closeWorkers);
 for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
   closeWorkers();
@@ -256,13 +258,19 @@ async function prepareDub(body, mediaTranscript) {
     contextAfter: transcript.segments.filter(s=>s.start>=segment.end).slice(0,2).map(s=>s.text).join(' ').slice(0,240),
     contextTopic: transcript.segments.filter(s=>s.end>=segment.start-45 && s.start<=segment.end+20).map(s=>s.text).join(' ').slice(-2200),
   }));
+  const speakerResults = settings.autoSpeaker && settings.ttsProvider === 'openai-realtime' && !mediaTranscript && body?.source !== 'self-test'
+    ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end}))
+    : Promise.resolve(limitedSegments.map(() => null));
   const translationStarted = performance.now();
   const translated = await translateSegments(limitedSegments, settings, timings);
   timings.translationMs = Math.round(performance.now() - translationStarted);
+  const speakers = await speakerResults;
   const speechStarted = performance.now();
   const ttsConcurrency = clamp(Number(process.env.LOCAL_TTS_CONCURRENCY || 3), 1, 6);
 
   const preparedItems = await mapLimit(limitedSegments, ttsConcurrency, async (segment) => {
+    const speaker = speakers[limitedSegments.indexOf(segment)];
+    const speechSettings = {...settings, voice: selectSpeakerVoice(settings, speaker)};
     const translation = translated.get(segment.index);
     if (!translation) throw httpError(502, `Translation missing for segment ${segment.index}.`);
     // Local translation has already shortened and checked required facts. Do not
@@ -273,7 +281,7 @@ async function prepareDub(body, mediaTranscript) {
       schemaVersion: 2,
       videoId,
       segment: { index: segment.index, start: segment.start, end: segment.end, text: segment.text },
-      settings: cacheableSettings(settings),
+      settings: cacheableSettings(speechSettings),
       translatedText: spokenText,
       speechText: synthesisText,
       speechTextRevision: SPEECH_TEXT_REVISION,
@@ -297,7 +305,7 @@ async function prepareDub(body, mediaTranscript) {
       const result = await synthesizeSpeech({
         text: synthesisText,
         duration: sourceDuration,
-        settings,
+        settings: speechSettings,
         outputPath: audioPath
       });
       audioDuration = result.duration || audioDuration;
@@ -326,7 +334,8 @@ async function prepareDub(body, mediaTranscript) {
         firstAudioMs,
         audioTranscript,
         speechSpeed: settings.speed,
-        voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : settings.voice,
+        voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : speechSettings.voice,
+        speaker,
         ttsModel: actualTtsModel
       }
     };
@@ -680,6 +689,7 @@ function normalizeSettings(settings = {}) {
     : String(settings.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id);
   return {
     mode: settings.mode,
+    autoSpeaker: ttsProvider === 'openai-realtime' && (settings.voice === 'auto' || settings.autoSpeaker === true),
     translationProvider: mode?.translationProvider || activeTranslationProvider(),
     voice,
     tone: String(settings.tone || process.env.SUPERTONE_STYLE || 'neutral'),

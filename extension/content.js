@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.1";
+  const BUILD_VERSION = "0.8.2";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -45,6 +45,8 @@
     originalVideoVolume: null,
     originalMuted: null,
     resumeVideoAfterPrepare: false,
+    startupPreparing: false,
+    wasPlayingBeforeStart: false,
     playbackHold: null,
     lastSyncVideoTime: null,
     metrics: null,
@@ -258,7 +260,7 @@
     try { const saved = localStorage.getItem('yld-dubbing-mode'); if (Object.hasOwn(modes, saved)) selectedMode = saved; } catch {}
     els.panel.dataset.mode = selectedMode;
     els.ttsProvider.disabled = true;
-    const savedVoices = { supertonic3: "M1", "openai-realtime": "marin", supertone: els.voice.value };
+    const savedVoices = { supertonic3: "M1", "openai-realtime": "auto", supertone: els.voice.value };
     let previousSpeechProvider = "supertone";
     const updateSpeechControls = () => {
       const provider = els.ttsProvider.value;
@@ -266,7 +268,7 @@
       els.voice.innerHTML = provider === "supertonic3"
         ? ["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"].map(voice => `<option value="${voice}">${voice} · ${voice[0] === "M" ? "남성" : "여성"}</option>`).join("")
         : provider === 'openai-realtime'
-          ? ['marin','cedar','coral','alloy'].map(voice => `<option value="${voice}">${voice}</option>`).join('')
+          ? '<option value="auto">자동 · 원본 음색에 맞춤</option>' + ['marin','cedar','coral','alloy'].map(voice => `<option value="${voice}">${voice}</option>`).join('')
           : cloudVoices;
       els.voice.value = savedVoices[provider] || savedVoices.supertone;
       previousSpeechProvider = provider;
@@ -396,7 +398,8 @@
     els.stop.disabled = false;
     state.originalVideoVolume = state.video.volume;
     state.originalMuted = state.video.muted;
-    state.resumeVideoAfterPrepare = !state.video.paused && !state.video.ended;
+    state.wasPlayingBeforeStart = !state.video.paused && !state.video.ended;
+    state.startupPreparing = true;
     pauseVideoForPrepareIfNeeded();
     applyOriginalVolume();
     setStatus("captions");
@@ -436,6 +439,7 @@
         `${segments.length} segments, ${state.chunks.length} chunks`,
         formatAudioState("buffered", getVideoTime())
       );
+      state.startupPreparing = false;
       beginSyncLoop();
       resumeVideoIfNeeded();
     } catch (error) {
@@ -453,13 +457,10 @@
   }
 
   function pauseVideoForPrepareIfNeeded() {
-    if (!state.video || state.video.paused || state.video.ended) {
-      state.resumeVideoAfterPrepare = false;
-      return;
-    }
-
+    if (!state.video) return;
+    // Start is an explicit request to play the dub, even when the video was paused.
     state.resumeVideoAfterPrepare = true;
-    state.video.pause();
+    if (!state.video.paused) state.video.pause();
     updateMeta(
       state.videoId || getVideoId() || "unknown",
       "not loaded",
@@ -531,11 +532,13 @@
   }
 
   function stopDub(options = {}) {
-    const shouldResume = options.resumeVideo !== false && state.resumeVideoAfterPrepare;
+    const shouldResume = options.resumeVideo !== false && state.resumeVideoAfterPrepare &&
+      (!state.startupPreparing || state.wasPlayingBeforeStart);
     state.sessionId += 1;
     state.captionAbortController?.abort();
     state.captionAbortController = null;
     state.running = false;
+    state.startupPreparing = false;
     els.start.disabled = false;
     els.stop.disabled = true;
 
@@ -2578,6 +2581,8 @@
           sourceText: item.sourceText || sourceChunk.text || "",
           translatedText: item.translatedText || "",
           ttsModel: item.ttsModel || "",
+          voiceId: item.voiceId || "",
+          speaker: item.speaker || null,
           speechSpeed: Number(item.speechSpeed || 1),
           audio: null,
         };
@@ -3002,7 +3007,7 @@
     const finite = value => Number.isFinite(value) ? value.toFixed(2) : "—";
     const mode = media => !media ? "없음" : media.error ? "오류" : media.ended ? "완료" : media.paused ? "일시정지" : "재생 중";
     els.diagnostics.textContent = [
-      '재생 코드: completed-clip-v2',
+      '재생 코드: explicit-start-v3',
       `유튜브 페이지 연결: ${state.pageProbeStatus}`,
       `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
       `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
@@ -3010,6 +3015,7 @@
       `재생 속도: ${finite(audio?.playbackRate)}배 · 클립 ${item ? item.chunkIndex + 1 : "—"}`,
       item?.ttsModel ? `음성 엔진: ${item.ttsModel} · 생성 속도 ${finite(item.speechSpeed)}배` : "",
       item ? `구간: ${finite(item.start)}–${finite(item.end)}초` : "",
+      item?.voiceId ? `음색: ${item.voiceId}${item.speaker ? ' · ' + ({male:'남성 음색',female:'여성 음색',unknown:'기본 음색 (판별 불가)'}[item.speaker.label] || '기본 음색') : ''}` : "",
       item?.sourceText ? `원문: ${item.sourceText}` : "",
       item?.translatedText ? `번역: ${item.translatedText}` : "",
       state.metrics ? `첫 더빙: ${state.metrics.firstAudioMs === null ? '준비 중' : (state.metrics.firstAudioMs / 1000).toFixed(2) + '초'} · 최근 준비: ${(state.metrics.lastPrepareMs / 1000).toFixed(2)}초` : "",
