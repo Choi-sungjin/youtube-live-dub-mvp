@@ -1,4 +1,6 @@
-# Local Live Dub · v0.7.0
+# Local Live Dub · v0.8.0
+
+<img src="extension/icons/icon-128.png" alt="Live Dub 아이콘" width="64" height="64">
 
 [**MP4·웹영상 지원 + Windows 자동 설치 ZIP 다운로드**](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip) · [설치 순서](docs/auto-install-windows.md)
 
@@ -9,6 +11,32 @@ Remotion으로 만든 17초 사용 안내 GIF입니다. 실제 재생 녹화나 
 유튜브의 원문 자막 또는 로컬 음성 인식 결과를 한국어로 번역하고, 영상 시간에 맞춰 더빙 음성을 재생하는 Chrome Manifest V3 확장 프로그램입니다. 현재 기본 경로는 **로컬 Gemma 4 E4B 번역 → Supertonic 3 음성 생성(1.15배)**입니다.
 
 **다른 PC에서 처음 설치한다면 [Windows 자동 설치 안내](docs/auto-install-windows.md)를 먼저 따르세요.** 같은 PC의 로컬 서버·모델이 필요합니다. YouTube 확장에 더해 **MP4 파일과 공개 MP4 웹영상**을 로컬 플레이어에서 지원합니다. 로그인 전용·DRM·HLS·blob 스트림과 SNS 전체 지원은 포함하지 않습니다.
+
+
+## 네 가지 더빙 모드
+
+YouTube 패널의 **설정**에서 번역과 음성을 조합합니다. Gemma 4는 번역을 맡고, 로컬 음성은 Supertonic 3가 만듭니다.
+
+| 모드 | 번역 | 음성 |
+|---|---|---|
+| 1. 모두 로컬 | Gemma 4 | Supertonic 3 |
+| 2. 로컬 번역 + GPT 음성 | Gemma 4 | GPT Realtime |
+| 3. GPT 번역 + 로컬 음성 | GPT | Supertonic 3 |
+| 4. 모두 GPT | GPT | GPT Realtime |
+
+원문 자막 수집·로컬 음성 인식은 공통입니다. GPT가 포함된 단계의 텍스트만 OpenAI에 전송하며 API 사용료가 발생합니다. 키는 서버에만 저장합니다. 모드 변경 시 기존 더빙을 멈추고 다음 시작부터 적용합니다. 첫 문장의 번역·음성이 준비되면 재생하고, 이어지는 문장을 순서대로 준비합니다. 문장 하나의 오디오 생성 완료 후 재생하는 방식이며, 생성 중인 PCM 조각을 브라우저에서 즉시 재생하는 방식은 아닙니다.
+
+GPT 기본 모델은 번역 `gpt-6-luna`, 음성 `gpt-realtime-2.1-mini`입니다. `OPENAI_MODEL`, `OPENAI_VOICE_MODEL`로 변경할 수 있으며 해당 API·기능을 지원하는 모델이어야 합니다. 로컬 음성 속도는 1.15배, GPT 음성은 1배입니다.
+
+```bash
+npm ci
+python3 scripts/set-openai-key.py
+# 키를 숨김 입력한 뒤 로컬 서버를 재시작합니다.
+```
+
+키는 `backend/.env.local`에 저장되며 Git에서 제외됩니다. 키가 없거나 서비스가 실패하면 오류를 표시합니다. 다른 유료 제공자로 자동 전환하지 않습니다. 기존 v0.7 안내 GIF·검증 기록은 이전 버전 자료입니다.
+
+Ubuntu 설치·시작 절차는 [Linux 안내](docs/install-linux.md)를 참고하세요.
 
 ## MP4 · 일반 웹영상
 
@@ -37,7 +65,7 @@ cd "$env:USERPROFILE\youtube-live-dub-mvp"
 
 1. 크롬의 `chrome://extensions`에서 기존 확장을 새로고침하거나, 개발자 모드의 압축해제 확장 불러오기로 `extension/` 폴더를 선택합니다.
 2. 유튜브 영상을 새로고침합니다. 패널이 숨겨졌다면 확장 아이콘에서 Open을 선택합니다.
-3. 패널 버전 **0.7.0**, Backend **http://127.0.0.1:18789**를 확인합니다.
+3. 패널 버전 **0.8.0**, Backend **http://127.0.0.1:18789**를 확인합니다.
 4. 기본 음성 엔진 **Supertonic 3 · 로컬 음성 · 1.15배**에서 **Test**, **Start** 순서로 확인합니다.
 5. 자동 서버 시작을 쓰려면 [native host 설치 안내](native-host/README.md)를 참고합니다. 수동 서버 실행 상태에서는 설치 없이 백엔드 연결이 가능합니다.
 
@@ -61,6 +89,8 @@ TTS_PROVIDER=supertonic3
 공식 모델과 사용 조건은 [Supertonic 3 모델 카드](https://huggingface.co/Supertone/supertonic-3)를 참고하세요. Windows 로컬 음성과 Supertone HTTP API도 선택지로 유지됩니다. Supertonic 3는 별도 API 키 없이 로컬에서 음성을 합성합니다.
 
 ## 검증 범위
+
+2026-11-02: 네 모드의 실제 API·로컬 음성 생성과 Chrome 연속 재생, 76개 개발 검사 결과는 [v0.8.0 검증 기록](docs/verification-2026-11-02/REPORT.md)에 있습니다.
 
 2026-10-17: 실제 유튜브 원본 다운로드, 앞 20초 음성 인식, 한국어 번역, Windows 음성 생성과 크롬 진단 화면 오디오 재생을 확인했습니다. 당시 Supertone HTTP API 요청은 HTTP 404를 반환했습니다.
 

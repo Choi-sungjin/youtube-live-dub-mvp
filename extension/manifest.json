@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Live Dub MVP",
-  "description": "Local Korean dubbing for YouTube, MP4 files and public MP4 web videos. Supertonic 3 speech at 1.15x.",
-  "version": "0.7.0",
+  "description": "Korean video dubbing with four combinations of local Gemma translation, Supertonic voice, and optional GPT translation/voice.",
+  "version": "0.8.0",
   "permissions": [
     "activeTab",
     "scripting",
@@ -20,7 +20,13 @@
   },
   "action": {
     "default_title": "Live Dub MVP",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "content_scripts": [
     {
@@ -28,18 +34,30 @@
         "https://www.youtube.com/watch*",
         "https://youtube.com/watch*"
       ],
-      "js": ["content.js"],
-      "css": ["content.css"],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-probe.js"],
+      "resources": [
+        "page-probe.js"
+      ],
       "matches": [
         "https://www.youtube.com/*",
         "https://youtube.com/*"
       ]
     }
-  ]
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
 }

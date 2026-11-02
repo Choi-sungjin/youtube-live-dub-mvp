@@ -238,6 +238,9 @@ function Install-DubWindows {
         if (-not $installationId) { $installationId = [guid]::NewGuid().ToString() }
         $resolved = @{}
         foreach ($name in $packages.Keys) { $resolved[$name] = Install-DubTool $name $packages[$name] }
+        $npm = Join-Path (Split-Path -Parent $resolved.Node) 'npm.cmd'
+        if (-not (Test-Path -LiteralPath $npm)) { throw 'npm.cmd was not found beside Node. Repair the Node installation.' }
+        Invoke-DubCommand $npm @('ci', '--omit=dev', '--ignore-scripts')
         Invoke-DubCommand $resolved.Node @('scripts/check.js')
         Invoke-DubCommand $resolved.FFmpeg @('-version')
         $python = Join-Path $Root '.venv-win\Scripts\python.exe'

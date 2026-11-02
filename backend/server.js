@@ -1,3 +1,5 @@
+import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
+import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_VOICE_MODEL, OPENAI_VOICES } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
 import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus, closeSupertonic } from './supertonic-speech.js';
 import { createDiskTextCache } from './disk-text-cache.js';
@@ -18,9 +20,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 const APP_VERSION = JSON.parse(await readFile(path.join(ROOT_DIR, 'package.json'), 'utf8')).version;
 
-await loadEnvFile(path.join(__dirname, '.env'));
-await loadEnvFile(path.join(__dirname, '.env.local'));
+// Explicit process environment wins; local overrides win over the template defaults.
 await loadEnvFile(path.join(ROOT_DIR, '.env.local'));
+await loadEnvFile(path.join(__dirname, '.env.local'));
+await loadEnvFile(path.join(__dirname, '.env'));
 
 const PORT = Number(process.env.PORT || 18789);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -28,7 +31,6 @@ const CACHE_DIR = path.join(__dirname, '.cache');
 const AUDIO_DIR = path.join(CACHE_DIR, 'audio');
 const STT_DIR = path.join(CACHE_DIR, 'stt');
 const AUDIT_DIR = path.join(CACHE_DIR, 'audit');
-const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const ZAI_CHAT_COMPLETIONS_URL = 'https://api.z.ai/api/paas/v4/chat/completions';
 const SUPERTONE_TTS_URL = 'https://supertoneapi.com/v1/text-to-speech';
 const MAX_TTS_CHARS = 300;
@@ -95,7 +97,8 @@ const server = createServer(async (req, res) => {
         // Installer ownership marker, not an authentication credential.
         installationId: process.env.YLD_INSTALLATION_ID || null,
         platform: process.platform,
-        ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone'] : ['supertonic3', 'supertone'],
+        ttsProviders: process.platform === 'win32' ? ['supertonic3', 'windows-sapi', 'supertone', 'openai-realtime'] : ['supertonic3', 'supertone', 'openai-realtime'],
+        dubbingModes: DUBBING_MODES,
         supertonic: supertonicStatus(),
         stt: fastSttStatus(),
         localTranslation: LOCAL_TRANSLATOR.status(),
@@ -202,21 +205,22 @@ function providerInfo() {
   );
   const ttsProvider = normalizeProvider(
     process.env.TTS_PROVIDER || 'supertonic3',
-    ['supertonic3', 'supertone', 'windows-sapi', 'mock-wav'],
+    ['supertonic3', 'supertone', 'windows-sapi', 'openai-realtime', 'mock-wav'],
     'supertonic3'
   );
 
   return {
     script: translationProvider,
     translation: translationProvider,
-    translationModel: translationProvider === 'ollama' ? LOCAL_TRANSLATOR.status().model : translationProvider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || 'gpt-5.2',
+    translationModel: translationProvider === 'ollama' ? LOCAL_TRANSLATOR.status().model : translationProvider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || OPENAI_TEXT_MODEL,
     translationLocation: translationProvider === 'ollama' ? 'local' : translationProvider === 'mock' ? 'test' : 'external',
     tts: ttsProvider,
-    openaiModel: process.env.OPENAI_MODEL || 'gpt-5.2',
+    openaiModel: process.env.OPENAI_MODEL || OPENAI_TEXT_MODEL,
     zaiModel: process.env.ZAI_MODEL || 'glm-4.7',
     zaiConfigured: Boolean(process.env.ZAI_API_KEY),
     supertoneModel: process.env.SUPERTONE_MODEL || 'sona_speech_2_flash',
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    openaiVoiceModel: process.env.OPENAI_VOICE_MODEL || OPENAI_VOICE_MODEL,
     supertoneConfigured: Boolean(process.env.SUPERTONE_API_KEY),
     defaultVoiceId: process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id,
     voiceSettings: {
@@ -242,7 +246,11 @@ async function prepareDub(body, mediaTranscript) {
     throw httpError(400, 'segments must contain at least one timed text segment.');
   }
 
-  const transcript = Array.isArray(mediaTranscript) ? {segments:mediaTranscript} : activeTranslationProvider() === 'ollama' ? await readCachedSttCaptions(videoId).catch(() => ({segments:[]})) : {segments:[]};
+  if ((settings.translationProvider === 'openai' || settings.ttsProvider === 'openai-realtime') && !process.env.OPENAI_API_KEY) {
+    throw httpError(503, 'OPENAI_API_KEY is not configured. Add it to backend/.env.local, then restart the server.');
+  }
+
+  const transcript = Array.isArray(mediaTranscript) ? {segments:mediaTranscript} : ['ollama', 'openai'].includes(activeTranslationProvider(settings)) ? await readCachedSttCaptions(videoId).catch(() => ({segments:[]})) : {segments:[]};
   const limitedSegments = segments.slice(0, 80).map(segment => ({...segment,
     contextBefore: transcript.segments.filter(s=>s.end<=segment.start).slice(-2).map(s=>s.text).join(' ').slice(-240),
     contextAfter: transcript.segments.filter(s=>s.start>=segment.end).slice(0,2).map(s=>s.text).join(' ').slice(0,240),
@@ -259,7 +267,7 @@ async function prepareDub(body, mediaTranscript) {
     if (!translation) throw httpError(502, `Translation missing for segment ${segment.index}.`);
     // Local translation has already shortened and checked required facts. Do not
     // silently remove the end of a complete sentence after that validation.
-    const spokenText = normalizeDubbingTranslation(activeTranslationProvider() === 'ollama' ? cleanText(translation) : clampTextForTts(translation), segment.text, settings.targetLang);
+    const spokenText = normalizeDubbingTranslation(cleanText(translation), segment.text, settings.targetLang);
     const synthesisText = settings.ttsProvider === 'supertonic3' ? speechText(spokenText, settings.targetLang) : spokenText;
     const cacheKey = {
       schemaVersion: 2,
@@ -270,7 +278,7 @@ async function prepareDub(body, mediaTranscript) {
       speechText: synthesisText,
       speechTextRevision: SPEECH_TEXT_REVISION,
       providers: {
-        translation: activeTranslationProvider(),
+        translation: activeTranslationProvider(settings),
         tts: activeTtsProvider(settings)
       }
     };
@@ -281,6 +289,8 @@ async function prepareDub(body, mediaTranscript) {
     let audioDuration = sourceDuration;
     let actualTtsModel = settings.ttsModel;
     let synthesisMs = 0;
+    let firstAudioMs = null;
+    let audioTranscript = null;
     if (exists) audioDuration = wavDuration(await readFile(audioPath));
 
     if (!exists) {
@@ -293,6 +303,8 @@ async function prepareDub(body, mediaTranscript) {
       audioDuration = result.duration || audioDuration;
       actualTtsModel = result.ttsModel || actualTtsModel;
       synthesisMs = result.synthesisMs || 0;
+      firstAudioMs = result.firstAudioMs ?? null;
+      audioTranscript = result.transcript ?? null;
     }
 
     return {
@@ -311,6 +323,8 @@ async function prepareDub(body, mediaTranscript) {
         duration: roundTime(audioDuration),
         durationMs: Math.round(audioDuration * 1000),
         synthesisMs,
+        firstAudioMs,
+        audioTranscript,
         speechSpeed: settings.speed,
         voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : settings.voice,
         ttsModel: actualTtsModel
@@ -328,7 +342,7 @@ async function prepareDub(body, mediaTranscript) {
     timings,
     provider: providerInfo(),
     requestProvider: {
-      translation: activeTranslationProvider(),
+      translation: activeTranslationProvider(settings),
       tts: settings.ttsProvider,
       ttsModel: settings.ttsProvider === 'windows-sapi' ? 'windows-sapi' : settings.ttsModel
     },
@@ -657,19 +671,23 @@ function normalizeYouTubeUrl(input, videoId) {
 }
 
 function normalizeSettings(settings = {}) {
-  const ttsProvider = normalizeProvider(settings.ttsProvider || process.env.TTS_PROVIDER || 'supertonic3',
-    ['supertonic3', 'supertone', 'windows-sapi', 'mock-wav'], 'supertonic3');
+  const mode = settings.mode == null ? null : resolveDubbingMode(settings.mode);
+  const ttsProvider = normalizeProvider(mode?.ttsProvider || settings.ttsProvider || process.env.TTS_PROVIDER || 'supertonic3',
+    ['supertonic3', 'supertone', 'windows-sapi', 'openai-realtime', 'mock-wav'], 'supertonic3');
   const voice = ttsProvider === 'supertonic3'
     ? (/^[MF][1-5]$/.test(settings.voice) ? settings.voice : 'M1')
+    : ttsProvider === 'openai-realtime' ? (OPENAI_VOICES.includes(settings.voice) ? settings.voice : 'marin')
     : String(settings.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id);
   return {
+    mode: settings.mode,
+    translationProvider: mode?.translationProvider || activeTranslationProvider(),
     voice,
     tone: String(settings.tone || process.env.SUPERTONE_STYLE || 'neutral'),
     pitchShift: clamp(Number(settings.pitchShift ?? process.env.SUPERTONE_PITCH_SHIFT ?? 0), -24, 24),
     pitchVariance: clamp(Number(settings.pitchVariance ?? process.env.SUPERTONE_PITCH_VARIANCE ?? 1.5), 0, 2),
-    speed: ttsProvider === 'supertonic3' ? 1.15 : clamp(Number(settings.speed ?? process.env.SUPERTONE_SPEED ?? 1.29), 0.5, 2),
+    speed: ttsProvider === 'openai-realtime' ? 1.0 : ttsProvider === 'supertonic3' ? 1.15 : clamp(Number(settings.speed ?? process.env.SUPERTONE_SPEED ?? 1.29), 0.5, 2),
     targetLang: String(settings.targetLang || 'ko'),
-    ttsModel: ttsProvider === 'supertonic3' ? 'supertonic-3' : ttsProvider === 'windows-sapi' ? 'windows-sapi' : String(settings.ttsModel || process.env.SUPERTONE_MODEL || 'sona_speech_2_flash'),
+    ttsModel: ttsProvider === 'openai-realtime' ? process.env.OPENAI_VOICE_MODEL || OPENAI_VOICE_MODEL : ttsProvider === 'supertonic3' ? 'supertonic-3' : ttsProvider === 'windows-sapi' ? 'windows-sapi' : String(settings.ttsModel || process.env.SUPERTONE_MODEL || 'sona_speech_2_flash'),
     ttsProvider
   };
 }
@@ -696,7 +714,7 @@ function normalizeSegment(segment, fallbackIndex) {
 }
 
 async function translateSegments(segments, settings, metrics = {}) {
-  const provider = activeTranslationProvider();
+  const provider = activeTranslationProvider(settings);
   const translated = new Map();
   const missing = [];
 
@@ -724,7 +742,7 @@ async function translateSegments(segments, settings, metrics = {}) {
       }
       providerTranslations = await translateSegmentsWithZai(missing, settings);
     } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
-      providerTranslations = await translateSegmentsWithOpenAI(missing, settings);
+      providerTranslations = await translateOpenAI(missing, settings, metrics);
     } else if (provider === 'mock') {
       providerTranslations = new Map(missing.map(segment => [segment.index, translateMock(segment.text, settings)]));
     } else {
@@ -847,76 +865,8 @@ async function requestZaiTranslation(promptPayload) {
   throw httpError(lastStatus || 500, `Z.ai Chat Completions API failed: ${trimForError(lastBody)}`);
 }
 
-async function translateSegmentsWithOpenAI(segments, settings) {
-  const translated = new Map();
-  const batches = batchArray(segments, 20);
-
-  for (const batch of batches) {
-    const promptPayload = {
-      target_language: settings.targetLang,
-      max_tts_chars: 260,
-      segments: batch.map((segment) => ({
-        index: segment.index,
-        start: segment.start,
-        end: segment.end,
-        text: segment.text
-      }))
-    };
-    const response = await fetch(OPENAI_RESPONSES_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-5.2',
-        reasoning: { effort: 'low' },
-        input: [
-          {
-            role: 'developer',
-            content: [
-              'Translate caption chunks into the requested target_language for dubbing. Never replace their meaning with generic filler.',
-              'Keep each translated text natural to hear, concise enough for text-to-speech, and under 260 characters.',
-              'Preserve every input index. Return JSON only: {"translations":[{"index":0,"text":"..."}]}.'
-            ].join(' ')
-          },
-          {
-            role: 'user',
-            content: JSON.stringify(promptPayload)
-          }
-        ]
-      })
-    });
-
-    const bodyText = await response.text();
-    if (!response.ok) {
-      throw httpError(response.status, `OpenAI Responses API failed: ${trimForError(bodyText)}`);
-    }
-
-    const body = safeJsonParse(bodyText);
-    const outputText = extractResponseText(body);
-    const parsed = parseJsonObject(outputText);
-    const items = Array.isArray(parsed?.translations) ? parsed.translations : [];
-
-    for (const item of items) {
-      const index = Number(item?.index);
-      const text = cleanText(item?.text || '');
-      if (Number.isInteger(index) && text) {
-        translated.set(index, text);
-      }
-    }
-
-    for (const segment of batch) {
-      if (!translated.has(segment.index)) {
-        throw httpError(502, `Translation provider omitted segment ${segment.index}; no substitute text was generated.`);
-      }
-    }
-  }
-
-  return translated;
-}
-
 async function synthesizeSpeech({ text, duration, settings, outputPath }) {
+  if (settings.ttsProvider === 'openai-realtime') return synthesizeOpenAISpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'supertonic3') return synthesizeSupertonicSpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'windows-sapi') return synthesizeWindowsSpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'supertone' && !process.env.SUPERTONE_API_KEY) {
@@ -1020,11 +970,11 @@ function rememberTranslation(key, text) {
 
 function translationCacheKey(segment, settings, provider) {
   return hashValue({
-    schemaVersion: 1,
+    schemaVersion: 2,
     provider,
-    model: provider === 'ollama' ? LOCAL_TRANSLATOR.status().model : provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || 'gpt-5.2',
+    model: provider === 'ollama' ? LOCAL_TRANSLATOR.status().model : provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || OPENAI_TEXT_MODEL,
     localRevision: provider === 'ollama' ? LOCAL_TRANSLATION_REVISION : undefined,
-    context: provider === 'ollama' ? translationContext(segment) : undefined,
+    context: provider === 'ollama' ? translationContext(segment) : provider === 'openai' ? segment.contextBefore || '' : undefined,
     targetLang: settings.targetLang,
     start: roundTime(segment.start),
     end: roundTime(segment.end),
@@ -1174,12 +1124,12 @@ async function fileExists(filePath) {
   }
 }
 
-function activeTranslationProvider() {
-  return normalizeProvider(process.env.TRANSLATION_PROVIDER || 'ollama', ['ollama', 'zai', 'openai', 'mock'], 'ollama');
+function activeTranslationProvider(settings) {
+  return normalizeProvider(settings?.translationProvider || process.env.TRANSLATION_PROVIDER || 'ollama', ['ollama', 'zai', 'openai', 'mock'], 'ollama');
 }
 
 function activeTtsProvider(settings) {
-  return normalizeProvider(settings?.ttsProvider || process.env.TTS_PROVIDER || 'supertonic3', ['supertonic3', 'supertone', 'windows-sapi', 'mock-wav'], 'supertonic3');
+  return normalizeProvider(settings?.ttsProvider || process.env.TTS_PROVIDER || 'supertonic3', ['supertonic3', 'supertone', 'windows-sapi', 'openai-realtime', 'mock-wav'], 'supertonic3');
 }
 
 function buildWarnings() {
@@ -1210,7 +1160,8 @@ function cacheableSettings(settings) {
     speed: settings.speed,
     targetLang: settings.targetLang,
     ttsModel: settings.ttsModel,
-    ttsProvider: settings.ttsProvider
+    ttsProvider: settings.ttsProvider,
+    translationProvider: settings.translationProvider
   };
 }
 

@@ -186,3 +186,27 @@
 .yld-diagnostics { margin-top: 8px; color: #cdd6e1; }
 .yld-diagnostics summary { cursor: pointer; }
 .yld-diagnostics pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 Arial, sans-serif; }
+
+/* Four-mode settings use the existing panel palette. */
+#yld-panel { --yld-bg:#111318; --yld-card:#20242d; --yld-fg:#f4f7fb; --yld-muted:#cdd6e1; --yld-accent:#1769d1; --yld-focus:#9bd5ff; width:min(340px,calc(100vw - 24px)); font-family:system-ui,sans-serif; }
+#yld-panel [hidden] { display:none !important; }
+#yld-panel .yld-settings-toggle { width:auto; padding:4px 8px; min-height:28px; }
+#yld-panel .yld-status { min-width:0; }
+.yld-mode-summary { margin:0; color:var(--yld-focus); font-weight:600; }
+.yld-modes { margin:0; padding:0; border:0; display:grid; gap:8px; }
+.yld-modes legend { font-size:13px; font-weight:700; margin-bottom:8px; }
+.yld-modes label { display:flex; gap:8px; align-items:center; padding:10px 8px; border:1px solid #697585; border-radius:8px; cursor:pointer; background:var(--yld-card); }
+.yld-modes label:has(input:checked) { border-color:var(--yld-focus); box-shadow:inset 3px 0 var(--yld-focus); }
+.yld-modes input { flex:0 0 auto; accent-color:var(--yld-accent); }
+.yld-modes small { display:block; margin-top:3px; font-size:11px; color:var(--yld-muted); }
+.yld-mode-note { margin:8px 0 0; color:var(--yld-muted); font-size:11px; line-height:1.6; }
+#yld-panel :is(button,input,select,summary):focus-visible { outline:2px solid var(--yld-focus); outline-offset:2px; }
+#yld-panel :is(button,label) { transition:background-color 120ms ease; }
+@media (prefers-reduced-motion:reduce) { #yld-panel * { transition:none !important; } }
+@media (max-width:480px) { #yld-panel { right:12px; top:60px; max-height:calc(100dvh - 72px); } .yld-body { max-height:calc(100dvh - 120px); } }
+@media (prefers-color-scheme:light) {
+ #yld-panel { --yld-bg:#f4f7fb; --yld-card:#fff; --yld-fg:#111318; --yld-muted:#374151; --yld-focus:#1254a6; background:var(--yld-bg); color:var(--yld-fg); border-color:#697585; }
+ #yld-panel :is(.yld-panel-input,.yld-panel-select,.yld-icon-button,.yld-panel-button:not(.yld-primary)) { background:var(--yld-card); color:var(--yld-fg); border-color:#697585; }
+ #yld-panel :is(.yld-label,.yld-meta,.yld-diagnostics) { color:var(--yld-muted); }
+ #yld-panel :is(.yld-meta strong,.yld-version,.yld-status) { color:var(--yld-focus); }
+}

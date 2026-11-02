@@ -92,7 +92,14 @@ function New-DubFixtureRoot([string]$Name) {
     return $root
 }
 function Stop-DubExistingBackend { param($InstallationId) }
-function Install-DubTool { param($Name, $PackageId); return "fixture-$Name.exe" }
+function Install-DubTool {
+    param($Name, $PackageId)
+    if ($Name -eq 'Node') {
+        [IO.File]::WriteAllText((Join-Path $fixture 'npm.cmd'), '')
+        return (Join-Path $fixture 'node.exe')
+    }
+    return "fixture-$Name.exe"
+}
 function Start-DubOllama { param($Executable, $Cache) }
 function Get-DubNvidiaMemory { return $script:freeMiB }
 function Invoke-RestMethod { param($Uri, $Method, $ContentType, $Body, $TimeoutSec); return @{ done = $true } }
@@ -120,6 +127,7 @@ Test-DubCase 'Full CPU installation prepares models and writes local settings be
     $result = Get-Content -Raw -LiteralPath (Join-Path $root 'backend\.cache\install-result.json') | ConvertFrom-Json
     Assert-DubTest ($result.modelsReady -and $result.speechSpeed -eq 1.15 -and $result.sttDevice -eq 'cpu') 'CPU result incorrect'
     Assert-DubTest ($script:started.Model -eq 'small') 'CPU model incorrect'
+    Assert-DubTest ($script:commands -contains 'ci --omit=dev --ignore-scripts') 'Node dependencies were not installed'
     Assert-DubTest (@($script:commands | Where-Object { $_ -match 'requirements-stt-gpu' }).Count -eq 0) 'CPU installed GPU dependencies'
     Assert-DubTest (@($script:commands | Where-Object { $_ -match 'pull gemma4:' }).Count -eq 1) 'Gemma not downloaded'
 }

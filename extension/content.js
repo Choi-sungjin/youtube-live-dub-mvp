@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.7.0";
+  const BUILD_VERSION = "0.8.0";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -13,10 +13,10 @@
   const PREPARE_LEAD_SECONDS = 0.18;
   const BUFFER_WINDOW_SECONDS = 90;
   const NEXT_BUFFER_THRESHOLD_SECONDS = 60;
-  const MAX_PREPARE_CHUNKS = 4;
+  const MAX_PREPARE_CHUNKS = 1;
   const BUFFER_CHECK_INTERVAL_MS = 1000;
   const MIN_START_BUFFER_SECONDS = 12;
-  const MIN_START_BUFFER_CLIPS = 4;
+  const MIN_START_BUFFER_CLIPS = 1;
   const SEEK_BUFFER_CLIPS = 2;
   const TEXT_TRACK_WAIT_MS = 4500;
   const CAPTION_FETCH_BUDGET_MS = 3500;
@@ -107,11 +107,23 @@
         <div class="yld-title">Live Dub MVP <span class="yld-version">v${BUILD_VERSION}</span></div>
         <div class="yld-header-actions">
           <div class="yld-status" data-yld-status>idle</div>
+          <button class="yld-panel-button yld-settings-toggle" type="button" data-yld-settings-toggle aria-expanded="false" aria-controls="yld-settings">설정</button>
           <button class="yld-icon-button" type="button" title="Hide panel" aria-label="Hide panel" data-yld-hide>×</button>
         </div>
       </div>
       <div class="yld-body">
         <div class="yld-alert" data-yld-alert hidden></div>
+        <p class="yld-mode-summary" data-yld-mode-summary aria-live="polite"></p>
+        <section id="yld-settings" hidden>
+          <fieldset class="yld-modes"><legend>번역 · 음성 조합</legend>
+            <label><input type="radio" name="yld-mode" value="local"><span><b>1. 모두 로컬</b><small>Gemma 4 번역 → Supertonic 3 음성</small></span></label>
+            <label><input type="radio" name="yld-mode" value="gemma-gpt"><span><b>2. 로컬 번역 · GPT 음성</b><small>Gemma 4 → GPT Realtime 음성</small></span></label>
+            <label><input type="radio" name="yld-mode" value="gpt-local"><span><b>3. GPT 번역 · 로컬 음성</b><small>GPT → Supertonic 3 음성</small></span></label>
+            <label><input type="radio" name="yld-mode" value="gpt"><span><b>4. 번역·음성 모두 GPT</b><small>GPT → GPT Realtime 음성</small></span></label>
+          </fieldset>
+          <p class="yld-mode-note" data-yld-mode-note></p>
+          <p class="yld-mode-note">원문은 유튜브 자막 또는 이 PC의 음성 인식으로 준비해요. 위 선택은 번역과 음성 출력에 적용돼요.</p>
+        </section>
 
         <div class="yld-row-inline">
           <button class="yld-panel-button yld-primary" type="button" data-yld-start>Start</button>
@@ -159,14 +171,14 @@
         <div class="yld-row">
           <label class="yld-label" for="yld-tts-provider">음성 엔진</label>
           <select id="yld-tts-provider" class="yld-panel-select" data-yld-tts-provider>
-            <option value="supertonic3">Supertonic 3 · 로컬 음성 · 1.15배</option>
+            <option value="openai-realtime">GPT Realtime · API 음성 · 1배</option><option value="supertonic3">Supertonic 3 · 로컬 음성 · 1.15배</option>
             <option value="windows-sapi">Windows 로컬 음성 (설치된 한국어 음성)</option>
             <option value="supertone">Supertone API</option>
           </select>
         </div>
         <div class="yld-row">
-          <label class="yld-label">Supertone model</label>
-          <select class="yld-panel-select" data-yld-model>
+          <label class="yld-label" for="yld-model">음성 모델</label>
+          <select id="yld-model" class="yld-panel-select" data-yld-model>
             <option value="sona_speech_2">Sona speech 2</option>
             <option value="sona_speech_2_flash">Sona speech 2 flash</option>
             <option value="sona_speech_1">Sona speech 1</option>
@@ -186,8 +198,8 @@
         </div>
 
         <div class="yld-row">
-          <label class="yld-label">Speed</label>
-          <input class="yld-panel-input" type="number" min="0.5" max="2" step="0.01" value="1.29" data-yld-speed>
+          <label class="yld-label" for="yld-speed">Speed</label>
+          <input id="yld-speed" class="yld-panel-input" type="number" min="0.5" max="2" step="0.01" value="1.29" data-yld-speed>
         </div>
 
         <div class="yld-meta" data-yld-meta>
@@ -239,23 +251,53 @@
     }
     els.panel.dataset.yldBound = "1";
     const cloudVoices = els.voice.innerHTML;
-    const savedVoices = { supertonic3: "M1", supertone: els.voice.value };
+    const modelOptions = els.model.innerHTML;
+    const modes = { local: ['supertonic3', 'Gemma 4 → Supertonic 3'], 'gemma-gpt': ['openai-realtime', 'Gemma 4 → GPT 음성'], 'gpt-local': ['supertonic3', 'GPT 번역 → Supertonic 3'], gpt: ['openai-realtime', 'GPT 번역 → GPT 음성'] };
+    let selectedMode = 'local';
+    try { const saved = localStorage.getItem('yld-dubbing-mode'); if (Object.hasOwn(modes, saved)) selectedMode = saved; } catch {}
+    els.panel.dataset.mode = selectedMode;
+    els.ttsProvider.disabled = true;
+    const savedVoices = { supertonic3: "M1", "openai-realtime": "marin", supertone: els.voice.value };
     let previousSpeechProvider = "supertone";
     const updateSpeechControls = () => {
       const provider = els.ttsProvider.value;
       savedVoices[previousSpeechProvider] = els.voice.value;
       els.voice.innerHTML = provider === "supertonic3"
         ? ["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"].map(voice => `<option value="${voice}">${voice} · ${voice[0] === "M" ? "남성" : "여성"}</option>`).join("")
-        : cloudVoices;
+        : provider === 'openai-realtime'
+          ? ['marin','cedar','coral','alloy'].map(voice => `<option value="${voice}">${voice}</option>`).join('')
+          : cloudVoices;
       els.voice.value = savedVoices[provider] || savedVoices.supertone;
       previousSpeechProvider = provider;
       els.voice.disabled = provider === "windows-sapi";
       [els.model, els.pitch, els.variance].forEach(control => { control.disabled = provider !== "supertone"; });
-      els.speed.disabled = provider === "supertonic3";
+      els.model.innerHTML = provider === 'openai-realtime' ? '<option>gpt-realtime-2.1-mini</option>' : provider === 'supertonic3' ? '<option>supertonic-3</option>' : modelOptions;
+      els.speed.disabled = provider === "supertonic3" || provider === 'openai-realtime';
+      if (provider === 'openai-realtime') els.speed.value = '1';
       if (provider === "supertonic3") els.speed.value = "1.15";
     };
     els.ttsProvider.addEventListener("change", updateSpeechControls);
-    updateSpeechControls();
+    function applyMode(mode) {
+      if (!Object.hasOwn(modes, mode)) return;
+      if (mode !== els.panel.dataset.mode || state.running || state.currentAudio) stopDub({ resumeVideo: false });
+      els.panel.dataset.mode = mode;
+      els.ttsProvider.value = modes[mode][0];
+      els.panel.querySelector(`[name="yld-mode"][value="${mode}"]`).checked = true;
+      els.panel.querySelector('[data-yld-mode-summary]').textContent = modes[mode][1];
+      els.panel.querySelector('[data-yld-mode-note]').textContent = mode === 'local'
+        ? '번역·음성 모두 이 PC에서 처리해요. 외부 AI API 요금이 없어요.'
+        : '선택한 단계의 텍스트를 OpenAI로 전송해요. API 사용량에 따라 과금돼요. 연결된 키가 필요해요.';
+      try { localStorage.setItem('yld-dubbing-mode', mode); } catch {}
+      updateSpeechControls();
+    }
+    const toggle = els.panel.querySelector('[data-yld-settings-toggle]');
+    toggle.addEventListener('click', () => {
+      const settings = els.panel.querySelector('#yld-settings');
+      settings.hidden = !settings.hidden;
+      toggle.setAttribute('aria-expanded', String(!settings.hidden));
+    });
+    els.panel.querySelectorAll('[name="yld-mode"]').forEach(input => input.addEventListener('change', () => applyMode(input.value)));
+    applyMode(selectedMode);
     els.start.addEventListener("click", startDub);
     els.stop.addEventListener("click", stopDub);
     els.test.addEventListener("click", testBackend);
@@ -443,6 +485,7 @@
         currentTime: getVideoTime(),
         source: "self-test",
         settings: {
+          mode: els.panel.dataset.mode || "local",
           voice: els.voice.value,
           tone: "neutral",
           targetLang: els.lang.value,
@@ -2846,6 +2889,7 @@
 
   function dubbingSettingsFromControls() {
     return {
+      mode: els.panel.dataset.mode || "local",
       voice: els.voice.value,
       tone: "neutral",
       targetLang: els.lang.value,

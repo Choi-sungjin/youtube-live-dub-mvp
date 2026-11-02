@@ -106,6 +106,7 @@ async function contentFixture(overrides = {}) {
     globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments };
     state.videoId = 'abcdefghijk'; state.video = video;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
+    els.panel = {dataset:{mode:'local'}};
     els.volume.value='35'; els.ttsProvider.value='windows-sapi';
     refreshPageState=()=>{}; setStatus=value=>{state.status=value}; updateMeta=()=>{};
     ensureBackendReady=overrides.health || (async()=>({ok:true}));
@@ -183,11 +184,11 @@ test('startup failure restores volume, mute and prior video playback', async () 
   await f.startDub(); assert.equal(f.state.status, 'error'); assert.equal(f.state.running, false); assert.equal(f.video.volume, 0.8); assert.equal(f.video.muted, false); assert.equal(f.video.paused, false);
 });
 
-test('first preparation requests a bounded four-clip buffer', async () => {
+test('first preparation requests one clip so later sentences cannot delay first playback', async () => {
   let count = 0;
   const chunks = Array.from({ length: 20 }, (_, index) => ({ index, start: index * 5, end: index * 5 + 5, text: 'caption' }));
   const f = await contentFixture({ chunks, prepare: async payload => { count = payload.segments.length; return {segments:[]}; } });
-  await f.startDub(); assert.equal(count, 4);
+  await f.startDub(); assert.equal(count, 1);
 });
 
 test('audio follows video pause, seek and playback rate', async () => {
@@ -272,8 +273,8 @@ test('seeking behind a distant prepared block requests the missing current audio
   assert.equal(f.getBufferInfo(42).readyClipsAhead, 0);
   f.maybePrepareMoreAudio(42, 'seek');
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.deepEqual(Array.from(requests[0]), [4, 5]);
-  assert.equal(f.getBufferInfo(42).preparedEnd, 60);
+  assert.deepEqual(Array.from(requests[0]), [4]);
+  assert.equal(f.getBufferInfo(42).preparedEnd, 50);
   f.stopDub();
 });
 

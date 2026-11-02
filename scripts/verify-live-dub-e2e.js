@@ -1,3 +1,4 @@
+import { resolveDubbingMode } from '../backend/dubbing-modes.js';
 const DEFAULT_BACKEND_URL = 'http://127.0.0.1:18789';
 const DEFAULT_VIDEO_URL = 'https://www.youtube.com/watch?v=T-HZHO_PQPY';
 
@@ -10,8 +11,10 @@ if (!videoId) {
   fail(`Could not parse video id from ${videoUrl}`);
 }
 
+const selectedMode = options.mode ? resolveDubbingMode(options.mode) : null;
 const settings = {
-  ttsProvider: options.ttsProvider || 'supertonic3',
+  ...(options.mode ? {mode:options.mode} : {}),
+  ttsProvider: selectedMode?.ttsProvider || options.ttsProvider || 'supertonic3',
   voice: options.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || '763d5f200a9f5808056733',
   tone: 'neutral',
   targetLang: options.targetLang || 'ko',
@@ -33,7 +36,7 @@ await checkHealth();
 const preprocess = await checkPreprocess();
 const captions = await checkCaptions(preprocess);
 const prepared = await checkPrepare(captions.segments.slice(0, Number(options.prepareSegments || 2)));
-await checkAudio(prepared.segments[0]);
+for (const segment of prepared.segments) await checkAudio(segment);
 
 report.ok = true;
 console.log(JSON.stringify(report, null, 2));
@@ -41,7 +44,10 @@ console.log(JSON.stringify(report, null, 2));
 async function checkHealth() {
   const body = await fetchJson(`${backendUrl}/api/health`);
   assert(body.ok, 'Backend health did not return ok=true.');
-  assert(body.provider?.zaiConfigured, 'Z.ai is not configured.');
+  const translation = selectedMode?.translationProvider || body.provider?.translation;
+  if (translation === 'ollama') assert(body.localTranslation?.ready, 'Gemma is not ready.');
+  if (translation === 'zai') assert(body.provider?.zaiConfigured, 'Z.ai is not configured.');
+  if (translation === 'openai' || settings.ttsProvider === 'openai-realtime') assert(body.provider?.openaiConfigured, 'OpenAI is not configured.');
   if (settings.ttsProvider === 'supertone') assert(body.provider?.supertoneConfigured, 'Supertone is not configured.');
   if (settings.ttsProvider === 'windows-sapi') assert(body.ttsProviders?.includes('windows-sapi'), 'Windows speech is unavailable.');
   if (settings.ttsProvider === 'supertonic3') assert(body.ttsProviders?.includes('supertonic3'), 'Supertonic 3 is unavailable.');
@@ -119,7 +125,13 @@ async function checkPrepare(segments) {
     })
   });
   assert(Array.isArray(body.segments) && body.segments.length === segments.length, 'Prepare did not return the expected number of segments.');
+  if (selectedMode) {
+    assert(body.requestProvider?.translation === selectedMode.translationProvider, 'Translation provider mismatch.');
+    assert(body.requestProvider?.tts === selectedMode.ttsProvider, 'Voice provider mismatch.');
+  }
   for (const segment of body.segments) {
+    assert(segment.translatedText?.trim(), 'Empty translation.');
+    assert(segment.duration > 0, 'Empty audio duration.');
     assert(segment.audioUrl || segment.audioDataUrl, `Prepared segment ${segment.index} has no audio URL/data.`);
   }
   addCheck('prepare', {
@@ -127,7 +139,9 @@ async function checkPrepare(segments) {
     prepared: body.segments.length,
     firstTranslatedText: body.segments[0]?.translatedText || '',
     provider: body.requestProvider,
-    firstAudioUrl: body.segments[0]?.audioUrl || ''
+    firstAudioUrl: body.segments[0]?.audioUrl || '',
+    timings:body.timings,
+    segments:body.segments.map(({sourceText,translatedText,audioUrl,duration,ttsModel,firstAudioMs,audioTranscript})=>({sourceText,translatedText,audioUrl,duration,ttsModel,firstAudioMs,audioTranscript}))
   });
   return body;
 }
