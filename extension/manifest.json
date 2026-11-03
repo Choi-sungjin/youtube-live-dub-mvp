@@ -3,7 +3,7 @@
   "minimum_chrome_version": "106",
   "name": "YouTube Live Dub MVP",
   "description": "Korean video dubbing with four combinations of local Gemma translation, Supertonic voice, and optional GPT translation/voice.",
-  "version": "0.8.3",
+  "version": "0.8.5",
   "permissions": [
     "activeTab",
     "scripting",
@@ -20,8 +20,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Live Dub MVP",
-    "default_popup": "popup.html",
+    "default_title": "Live Dub 패널 열기",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -49,5 +48,25 @@
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
+  },
+  "commands": {
+    "yld-start": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "더빙 시작"
+    },
+    "yld-stop": {
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
+      "description": "더빙 정지"
+    },
+    "yld-panel": {
+      "suggested_key": {
+        "default": "Alt+Shift+Y"
+      },
+      "description": "더빙 패널 열기 / 닫기"
+    }
   }
 }

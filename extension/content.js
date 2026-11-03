@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.3";
+  const BUILD_VERSION = "0.8.5";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -35,6 +35,9 @@
   const MAX_SYNC_PLAYBACK_RATE = 1.75;
 
   const state = {
+    connectionLost: false,
+    recoveryReloading: false,
+    recoveryResume: null,
     running: false,
     sessionId: 0,
     captionAbortController: null,
@@ -79,6 +82,7 @@
 
   function init() {
     ensurePanel();
+    state.recoveryResume = consumeRecovery();
     bindPanelEvents();
     refreshPageState();
     setStatus("idle");
@@ -117,7 +121,6 @@
       <div class="yld-body">
         <div class="yld-alert" data-yld-alert hidden></div>
         <p class="yld-mode-summary" data-yld-mode-summary aria-live="polite"></p>
-        <section id="yld-settings" hidden>
           <fieldset class="yld-modes"><legend>번역 · 음성 조합</legend>
             <label><input type="radio" name="yld-mode" value="local"><span><b>1. 모두 로컬</b><small>Gemma 4 번역 → Supertonic 3 음성</small></span></label>
             <label><input type="radio" name="yld-mode" value="gemma-gpt"><span><b>2. 로컬 번역 · GPT 음성</b><small>Gemma 4 → GPT Realtime 음성</small></span></label>
@@ -125,22 +128,11 @@
             <label><input type="radio" name="yld-mode" value="gpt"><span><b>4. 번역·음성 모두 GPT</b><small>GPT → GPT Realtime 음성</small></span></label>
           </fieldset>
           <p class="yld-mode-note" data-yld-mode-note></p>
-          <p class="yld-mode-note">원문은 유튜브 자막 또는 이 PC의 음성 인식으로 준비해요. 위 선택은 번역과 음성 출력에 적용돼요.</p>
-        </section>
+
 
         <div class="yld-row-inline">
           <button class="yld-panel-button yld-primary" type="button" data-yld-start>Start</button>
           <button class="yld-panel-button" type="button" data-yld-stop disabled>Stop</button>
-        </div>
-
-        <div class="yld-row">
-          <label class="yld-label" for="yld-backend">
-            Backend
-          </label>
-          <div class="yld-row-inline yld-backend-grid">
-            <input id="yld-backend" class="yld-panel-input" type="text" value="${DEFAULT_BACKEND_URL}" data-yld-backend>
-            <button class="yld-panel-button" type="button" data-yld-test>Test</button>
-          </div>
         </div>
 
         <div class="yld-row">
@@ -169,6 +161,20 @@
               <option value="ja">Japanese</option>
             </select>
           </label>
+        </div>
+
+        <section id="yld-settings" class="yld-advanced-settings" hidden>
+          <p class="yld-mode-note">원문은 유튜브 자막 또는 이 PC의 음성 인식으로 준비해요. 위 선택은 번역과 음성 출력에 적용돼요.</p>
+          <p class="yld-mode-note" data-yld-shortcuts aria-live="polite">단축키 확인 중…</p>
+          <button class="yld-panel-button" type="button" data-yld-shortcuts-edit>단축키 변경</button>
+        <div class="yld-row">
+          <label class="yld-label" for="yld-backend">
+            Backend
+          </label>
+          <div class="yld-row-inline yld-backend-grid">
+            <input id="yld-backend" class="yld-panel-input" type="text" value="${DEFAULT_BACKEND_URL}" data-yld-backend>
+            <button class="yld-panel-button" type="button" data-yld-test>Test</button>
+          </div>
         </div>
 
         <div class="yld-row">
@@ -201,8 +207,9 @@
         </div>
 
         <div class="yld-row">
-          <label class="yld-label" for="yld-speed">Speed</label>
-          <input id="yld-speed" class="yld-panel-input" type="number" min="0.5" max="2" step="0.01" value="1.29" data-yld-speed>
+          <label class="yld-label" for="yld-speed">더빙 재생 속도</label>
+          <input id="yld-speed" class="yld-panel-input" type="number" min="0.5" max="2" step="0.1" value="1" data-yld-speed>
+          <small class="yld-mode-note">0.5~2배 · 바로 반영돼요. 느리게 설정하면 문장이 끝날 때까지 영상이 잠시 기다릴 수 있어요.</small>
         </div>
 
         <div class="yld-meta" data-yld-meta>
@@ -215,6 +222,7 @@
           <summary>재생 진단</summary>
           <pre data-yld-diagnostics></pre>
         </details>
+        </section>
       </div>
     `;
 
@@ -242,6 +250,7 @@
     els.pitch = panel.querySelector("[data-yld-pitch]");
     els.variance = panel.querySelector("[data-yld-variance]");
     els.speed = panel.querySelector("[data-yld-speed]");
+    try { els.speed.value = String(normalizeDubSpeed(localStorage.getItem("yld-playback-speed"))); } catch {}
     els.meta = panel.querySelector("[data-yld-meta]");
     els.error = panel.querySelector("[data-yld-error]");
     els.diagnostics = panel.querySelector("[data-yld-diagnostics]");
@@ -258,6 +267,7 @@
     const modes = { local: ['supertonic3', 'Gemma 4 → Supertonic 3'], 'gemma-gpt': ['openai-realtime', 'Gemma 4 → GPT 음성'], 'gpt-local': ['supertonic3', 'GPT 번역 → Supertonic 3'], gpt: ['openai-realtime', 'GPT 번역 → GPT 음성'] };
     let selectedMode = 'local';
     try { const saved = localStorage.getItem('yld-dubbing-mode'); if (Object.hasOwn(modes, saved)) selectedMode = saved; } catch {}
+    if (Object.hasOwn(modes, state.recoveryResume?.mode)) selectedMode = state.recoveryResume.mode;
     els.panel.dataset.mode = selectedMode;
     els.ttsProvider.disabled = true;
     const savedVoices = { supertonic3: "auto", "openai-realtime": "auto", supertone: els.voice.value };
@@ -275,9 +285,7 @@
       els.voice.disabled = provider === "windows-sapi";
       [els.model, els.pitch, els.variance].forEach(control => { control.disabled = provider !== "supertone"; });
       els.model.innerHTML = provider === 'openai-realtime' ? '<option>gpt-realtime-2.1-mini</option>' : provider === 'supertonic3' ? '<option>supertonic-3</option>' : modelOptions;
-      els.speed.disabled = provider === "supertonic3" || provider === 'openai-realtime';
-      if (provider === 'openai-realtime') els.speed.value = '1';
-      if (provider === "supertonic3") els.speed.value = "1.15";
+      els.speed.disabled = false;
     };
     els.ttsProvider.addEventListener("change", updateSpeechControls);
     function applyMode(mode) {
@@ -298,9 +306,23 @@
       const settings = els.panel.querySelector('#yld-settings');
       settings.hidden = !settings.hidden;
       toggle.setAttribute('aria-expanded', String(!settings.hidden));
+      if (!settings.hidden) void refreshShortcuts();
     });
     els.panel.querySelectorAll('[name="yld-mode"]').forEach(input => input.addEventListener('change', () => applyMode(input.value)));
+    els.panel.querySelector('[data-yld-shortcuts-edit]').addEventListener('click', async () => {
+      try {
+        const response = await sendRuntimeMessage({type:'YLD_SHORTCUTS_OPEN'});
+        if (!response?.ok) throw new Error(response?.error || '설정을 열지 못했어요.');
+      } catch {
+        els.panel.querySelector('[data-yld-shortcuts]').textContent = '크롬 주소창에 chrome://extensions/shortcuts 를 입력해 변경해 주세요.';
+      }
+    });
+    window.addEventListener('focus', () => {
+      if (!els.panel.querySelector('#yld-settings').hidden && !state.connectionLost) void refreshShortcuts();
+    });
     applyMode(selectedMode);
+    els.speed.addEventListener("input", applyDubSpeed);
+    els.speed.addEventListener("change", () => { els.speed.value = String(getDubSpeed()); applyDubSpeed(); });
     els.start.addEventListener("click", startDub);
     els.stop.addEventListener("click", stopDub);
     els.test.addEventListener("click", testBackend);
@@ -313,8 +335,22 @@
     });
   }
 
+  async function refreshShortcuts() {
+    const display = els.panel.querySelector('[data-yld-shortcuts]');
+    try {
+      const response = await sendRuntimeMessage({type:'YLD_SHORTCUTS_GET'});
+      if (!response?.ok || !Array.isArray(response.payload)) throw new Error('Unavailable');
+      const key = name => response.payload.find(item => item.name === name)?.shortcut || '미지정';
+      display.textContent = `패널: ${key('yld-panel')} · 시작: ${key('yld-start')} · 정지: ${key('yld-stop')}`;
+    } catch {
+      display.textContent = '단축키를 확인하지 못했어요. 아래 버튼에서 설정할 수 있어요.';
+    }
+  }
+
   function handleRuntimeMessage(message, _sender, sendResponse) {
     if (!message || ![
+      "YLD_DUB_START",
+      "YLD_DUB_STOP",
       "YLD_PANEL_STATUS",
       "YLD_PANEL_SHOW",
       "YLD_PANEL_HIDE",
@@ -324,8 +360,14 @@
     }
 
     try {
-      if (message.type === "YLD_PANEL_SHOW") {
+      if (message.type === "YLD_DUB_START") {
         setPanelVisible(true);
+        if (!state.running && !els.start.disabled) void startDub({recover:false});
+      } else if (message.type === "YLD_DUB_STOP") {
+        stopDub();
+      } else if (message.type === "YLD_PANEL_SHOW") {
+        setPanelVisible(true);
+        (els.start.disabled ? els.panel.querySelector("[data-yld-settings-toggle]") : els.start).focus();
       } else if (message.type === "YLD_PANEL_HIDE") {
         setPanelVisible(false);
       } else if (message.type === "YLD_PANEL_TOGGLE") {
@@ -374,7 +416,12 @@
     };
   }
 
-  async function startDub() {
+  async function startDub(options = {}) {
+    if (state.connectionLost || !hasRuntimeConnection()) {
+      markConnectionLost();
+      if (options.recover !== false) recoverConnection();
+      return;
+    }
     if (state.running) {
       return;
     }
@@ -469,6 +516,7 @@
   }
 
   async function testBackend() {
+    if (state.connectionLost || !hasRuntimeConnection()) { markConnectionLost(); return; }
     if (state.running) return;
     const sessionId = ++state.sessionId;
     els.test.disabled = true;
@@ -495,7 +543,7 @@
           ttsProvider: els.ttsProvider.value,
           pitchShift: Number(els.pitch.value),
           pitchVariance: Number(els.variance.value),
-          speed: Number(els.speed.value),
+          speed: els.ttsProvider.value === "supertonic3" ? 1.15 : 1,
         },
         segments: [
           {
@@ -527,11 +575,12 @@
       setStatus("error");
       updateMeta(state.videoId || getVideoId() || "unknown", "not loaded", "backend check failed");
     } finally {
-      els.test.disabled = false;
+      els.test.disabled = state.connectionLost;
     }
   }
 
   function stopDub(options = {}) {
+    state.recoveryResume = null;
     const shouldResume = options.resumeVideo !== false && state.resumeVideoAfterPrepare &&
       (!state.startupPreparing || state.wasPlayingBeforeStart);
     state.sessionId += 1;
@@ -603,6 +652,25 @@
     state.bufferTimer = setInterval(() => {
       maybePrepareMoreAudio(getVideoTime(), "timer");
     }, BUFFER_CHECK_INTERVAL_MS);
+  }
+
+  function normalizeDubSpeed(value) {
+    const speed = Number(value);
+    return value === null || value === "" || !Number.isFinite(speed) ? 1 : Math.max(0.5, Math.min(2, speed));
+  }
+
+  function getDubSpeed() { return normalizeDubSpeed(els.speed?.value ?? 1); }
+
+  function applyDubSpeed() {
+    const speed = getDubSpeed();
+    try { localStorage.setItem("yld-playback-speed", String(speed)); } catch {}
+    if (state.currentAudio) {
+      const syncRate = state.audioRateAnchor?.syncRate || 1;
+      state.audioRateAnchor = {audio:state.currentAudio, videoTime:getVideoTime(), audioTime:state.currentAudio.currentTime, syncRate};
+      state.currentAudio.playbackRate = syncRate * (state.video?.playbackRate || 1) * speed;
+    }
+    if (state.testAudio) state.testAudio.playbackRate = speed;
+    renderPlaybackDiagnostics();
   }
 
   function syncAudioToVideo() {
@@ -678,12 +746,26 @@
     const segmentDuration = Math.max(0.35, item.end - item.start);
     // Supertonic files already contain the requested 1.15x speech. Do not retime them again.
     const syncRate = item.ttsModel === "supertonic-3" ? 1 : clampPlaybackRate(audioDuration / segmentDuration);
-    const elapsed = Math.max(0, (videoTime - item.start) * syncRate);
+    const userSpeed = getDubSpeed();
+    if (state.audioRateAnchor?.audio !== item.audio) {
+      state.audioRateAnchor = {audio:item.audio, videoTime:item.start, audioTime:0, syncRate};
+    }
+    const anchor = state.audioRateAnchor;
+    anchor.syncRate = syncRate;
+    const elapsed = Math.max(0, anchor.audioTime + (videoTime - anchor.videoTime) * syncRate * userSpeed);
     // A clip may start slightly before its caption. HTMLMediaElement.play() on
     // an ended clip restarts it from zero even while video elapsed is still short
     // of duration. Keep the completed clip until the next caption or a real seek.
     if (item.chunkIndex === state.currentChunkIndex && state.currentAudio?.ended) return;
     if (elapsed >= audioDuration) {
+      // The media clock may trail the predicted offset after a rate change.
+      // Preserve this clip/anchor until its real ended event; resetting either
+      // would let the next tick re-enter the same sentence at an older offset.
+      if (item.chunkIndex === state.currentChunkIndex && state.currentAudio) {
+        state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1) * userSpeed;
+        if (state.currentAudio.paused && !state.currentAudio.ended) playAudio(state.currentAudio);
+        return;
+      }
       stopCurrentAudio();
       return;
     }
@@ -693,8 +775,9 @@
       stopCurrentAudio();
       state.currentChunkIndex = item.chunkIndex;
       state.currentAudio = item.audio;
+      state.audioRateAnchor = anchor;
       state.currentAudio.volume = 1;
-      state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1);
+      state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1) * userSpeed;
       seekAudio(state.currentAudio, offset);
       playAudio(state.currentAudio);
       updateMeta(
@@ -709,7 +792,7 @@
       return;
     }
 
-    state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1);
+    state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1) * userSpeed;
 
     if (Math.abs(state.currentAudio.currentTime - offset) > SYNC_TOLERANCE_SECONDS) {
       seekAudio(state.currentAudio, offset);
@@ -737,6 +820,7 @@
   }
 
   function stopCurrentAudio() {
+    state.audioRateAnchor = null;
     if (!state.currentAudio) {
       return;
     }
@@ -904,6 +988,7 @@
     if (sessionId !== state.sessionId) return;
     const audio = new Audio(fetched.dataUrl);
     audio.volume = 1;
+    audio.playbackRate = getDubSpeed();
     state.testAudio = audio;
 
     await waitForAudioReady(audio);
@@ -981,8 +1066,92 @@
     });
   }
 
+  // A reloaded extension invalidates the old isolated world. Never retry paid
+  // prepare requests on a closed message channel: the server may have received it.
+  function hasRuntimeConnection() {
+    try { return Boolean(chrome.runtime?.id); } catch { return false; }
+  }
+
+  function markConnectionLost() {
+    if (state.connectionLost) return;
+    const wasActive = state.running || Boolean(state.testAudio);
+    state.connectionLost = true;
+    state.recoveryResume = null;
+    stopDub({ keepStatus: true, resumeVideo: false });
+    if (wasActive) state.video?.pause();
+    state.pageProbeStatus = "확장 연결 끊김";
+    state.lastError = "확장 프로그램과 연결이 끊겼어요. ‘연결 복구’를 누르면 보던 위치와 설정으로 다시 시작해요.";
+    els.start.textContent = "연결 복구";
+    els.start.disabled = false;
+    els.test.disabled = true;
+    setStatus("연결 복구 필요");
+    updateMeta(state.videoId, "연결 복구 대기", "중복 요청을 중단했어요.");
+    renderPlaybackDiagnostics();
+  }
+
+  async function sendRuntimeMessage(message) {
+    if (state.connectionLost || !hasRuntimeConnection()) {
+      markConnectionLost();
+      throw new Error("확장 연결 복구가 필요합니다.");
+    }
+    try { return await chrome.runtime.sendMessage(message); }
+    catch (error) {
+      if (!hasRuntimeConnection() || /Extension context invalidated|Receiving end does not exist|message (?:port|channel) closed|message channel closed before/i.test(error?.message || "")) {
+        markConnectionLost();
+        throw new Error("확장 연결 복구가 필요합니다.");
+      }
+      throw error;
+    }
+  }
+
+  function recoverConnection() {
+    if (state.recoveryReloading) return;
+    state.recoveryReloading = true;
+    state.video = document.querySelector("video.html5-main-video") || document.querySelector("video");
+    els.start.disabled = true;
+    try {
+      sessionStorage.setItem("yld-connection-recovery", JSON.stringify({
+        videoId: getVideoId(), time: getVideoTime(), savedAt: Date.now(), mode: els.panel.dataset.mode,
+        voice: els.voice.value, lang: els.lang.value, volume: Number(els.volume.value), playbackSpeed: Number(els.speed?.value) || 1,
+      }));
+      savePanelVisible(true);
+    } catch { /* Reload still repairs the connection if storage is unavailable. */ }
+    window.location.reload();
+  }
+
+  function consumeRecovery() {
+    try {
+      const raw = sessionStorage.getItem("yld-connection-recovery");
+      sessionStorage.removeItem("yld-connection-recovery");
+      const saved = JSON.parse(raw || "null");
+      if (saved?.videoId !== getVideoId() || !Number.isFinite(saved.time) || saved.time < 0 ||
+          !Number.isFinite(saved.savedAt) || Date.now() - saved.savedAt > 30000 || saved.savedAt > Date.now()) return null;
+      return saved;
+    } catch { return null; }
+  }
+
+  function resumeAfterRecovery() {
+    const saved = state.recoveryResume;
+    if (!saved) return;
+    if (saved.videoId !== getVideoId() || Date.now() - saved.savedAt > 30000) { state.recoveryResume = null; return; }
+    if (!state.video || state.video.readyState < 1 || !Number.isFinite(state.video.duration)) return;
+    state.recoveryResume = null; // Consumed before starting: failure cannot cause a reload loop.
+    if (Array.from(els.voice.options).some(option => option.value === saved.voice)) els.voice.value = saved.voice;
+    if (["ko", "en", "ja"].includes(saved.lang)) els.lang.value = saved.lang;
+    if (Number.isFinite(saved.volume)) {
+      els.volume.value = String(Math.max(0, Math.min(100, saved.volume)));
+      els.volumeLabel.textContent = `${els.volume.value}%`;
+    }
+    if (els.speed && Number.isFinite(saved.playbackSpeed)) els.speed.value = String(Math.max(0.5, Math.min(2, saved.playbackSpeed)));
+    seekVideo(Math.min(saved.time, Math.max(0, state.video.duration - 0.1)));
+    const resumeSessionId = state.sessionId;
+    if (saved.autoStart !== false) setTimeout(() => {
+      if (!state.connectionLost && state.sessionId === resumeSessionId) startDub({ recover: false });
+    }, 0);
+  }
+
   async function fetchAudioDataUrl(audioUrl) {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendRuntimeMessage({
       type: "YLD_FETCH_AUDIO",
       payload: { audioUrl },
     });
@@ -1000,7 +1169,7 @@
   }
 
   async function requestDubPrepare(payload) {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendRuntimeMessage({
       type: "YLD_PREPARE_DUB",
       payload,
     });
@@ -1013,13 +1182,13 @@
   }
 
   async function ensureBackendReady(backendUrl) {
-    const response = await chrome.runtime.sendMessage({ type: "YLD_BACKEND_HEALTH", payload: { backendUrl } });
+    const response = await sendRuntimeMessage({ type: "YLD_BACKEND_HEALTH", payload: { backendUrl } });
     if (!response?.ok || !response.payload?.ok) throw new Error(response?.error || "Backend is unavailable.");
     return response.payload;
   }
 
   async function startBackendViaNativeHost(backendUrl) {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendRuntimeMessage({
       type: "YLD_BACKEND_START",
       payload: { backendUrl },
     });
@@ -1754,7 +1923,7 @@
   async function fetchBackendCaptionSegments(videoId, options = {}) {
     const sessionId = state.sessionId;
     try {
-      const response = await chrome.runtime.sendMessage({
+      const response = await sendRuntimeMessage({
         type: "YLD_FETCH_CAPTIONS",
         payload: {
           backendUrl: els.backend.value,
@@ -1821,7 +1990,7 @@
         payload.force = true;
       }
 
-      const startResponse = await chrome.runtime.sendMessage({
+      const startResponse = await sendRuntimeMessage({
         type: "YLD_PREPROCESS_CAPTIONS",
         payload,
       });
@@ -1857,7 +2026,7 @@
           return cachedSegments;
         }
 
-        const statusResponse = await chrome.runtime.sendMessage({
+        const statusResponse = await sendRuntimeMessage({
           type: "YLD_PREPROCESS_STATUS",
           payload: {
             backendUrl: els.backend.value,
@@ -1973,7 +2142,7 @@
         formatAudioState(`extending transcript ${formatTime(windowStart)}-${formatTime(windowStart + windowDuration)}`, getVideoTime())
       );
 
-      const startResponse = await chrome.runtime.sendMessage({
+      const startResponse = await sendRuntimeMessage({
         type: "YLD_PREPROCESS_CAPTIONS",
         payload: {
           backendUrl: els.backend.value,
@@ -2005,7 +2174,7 @@
       while (isActiveSession(sessionId) && Date.now() - startedAt < PREPROCESS_WAIT_MS) {
         await delay(PREPROCESS_POLL_MS);
         if (!isActiveSession(sessionId)) return [];
-        const statusResponse = await chrome.runtime.sendMessage({
+        const statusResponse = await sendRuntimeMessage({
           type: "YLD_PREPROCESS_STATUS",
           payload: {
             backendUrl: els.backend.value,
@@ -2664,7 +2833,7 @@
 
   async function injectPageProbe(requestId, mode, options = {}) {
     try {
-      const response = await chrome.runtime.sendMessage({
+      const response = await sendRuntimeMessage({
         type: "YLD_PAGE_PROBE",
         payload: { requestId, mode: mode || "snapshot", targetLang: options.targetLang || els.lang?.value || "ko" },
       });
@@ -2816,8 +2985,11 @@
   }
 
   function refreshPageState() {
+    if (!hasRuntimeConnection()) markConnectionLost();
+    if (state.connectionLost) return;
     state.videoId = getVideoId();
     state.video = document.querySelector("video.html5-main-video") || document.querySelector("video");
+    resumeAfterRecovery();
 
     if (!state.running && ["idle", "stopped"].includes(state.status)) {
       updateMeta(state.videoId || "unknown", "not loaded", "none");
@@ -2909,7 +3081,7 @@
       ttsProvider: els.ttsProvider.value,
       pitchShift: Number(els.pitch.value),
       pitchVariance: Number(els.variance.value),
-      speed: Number(els.speed.value),
+      speed: els.ttsProvider.value === "supertonic3" ? 1.15 : 1,
     };
   }
 
@@ -2980,6 +3152,7 @@
   }
 
   function setStatus(status) {
+    if (state.connectionLost) status = "연결 복구 필요";
     state.status = status;
     els.status.textContent = status;
     renderAlert();
@@ -3012,7 +3185,7 @@
       `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
       `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
       `더빙: ${finite(audio?.currentTime)} / ${finite(audio?.duration)}초 · ${mode(audio)}`,
-      `재생 속도: ${finite(audio?.playbackRate)}배 · 클립 ${item ? item.chunkIndex + 1 : "—"}`,
+      `재생 속도: ${finite(audio?.playbackRate)}배 · 사용자 설정 ${getDubSpeed().toFixed(2)}배 · 클립 ${item ? item.chunkIndex + 1 : "—"}`,
       item?.ttsModel ? `음성 엔진: ${item.ttsModel} · 생성 속도 ${finite(item.speechSpeed)}배` : "",
       item ? `구간: ${finite(item.start)}–${finite(item.end)}초` : "",
       item?.voiceId ? `음색: ${item.voiceId}${item.speaker ? ' · ' + ({male:'남성 음색',female:'여성 음색',unknown:'기본 음색 (판별 불가)'}[item.speaker.label] || '기본 음색') : ''}` : "",
@@ -3036,7 +3209,7 @@
     }
 
     els.alert.hidden = false;
-    els.alert.textContent = `Error: ${state.lastError}`;
+    els.alert.textContent = state.connectionLost ? state.lastError : `Error: ${state.lastError}`;
   }
 
   function cleanCaptionText(text) {

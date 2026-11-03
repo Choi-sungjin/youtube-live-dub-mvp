@@ -101,9 +101,9 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
 async function contentFixture(overrides = {}) {
   const source = await readFile('extension/content.js', 'utf8');
   const video = { currentTime: 0, volume: 0.8, muted: false, paused: false, ended: false, playbackRate: 1, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } };
-  const context = vm.createContext({ window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
+  const context = vm.createContext({ chrome: {runtime: {id:"fixture"}}, window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
   const injection = `
-    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments };
+    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments };
     state.videoId = 'abcdefghijk'; state.video = video;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
     els.panel = {dataset:{mode:'local'}};
@@ -583,4 +583,40 @@ test('cancel or failure during startup preserves an originally paused video', as
   assert.equal(f.video.paused,true);assert.equal(f.state.running,false);
   const failed=await contentFixture({health:async()=>{throw new Error('offline')}});
   failed.video.paused=true;await failed.startDub();assert.equal(failed.video.paused,true);
+});
+
+test('user speed changes audio immediately without resetting its position or changing synthesis settings',async()=>{
+ const f=await contentFixture();let plays=0;
+ const audio={duration:10,currentTime:0,paused:true,playbackRate:1,pause(){this.paused=true;},play(){plays++;this.paused=false;return Promise.resolve();}};
+ f.state.running=true;f.els.ttsProvider.value='supertonic3';
+ f.state.chunks=[{index:0,start:10,end:20}];
+ f.state.prepared=[{chunkIndex:0,start:10,end:20,ttsModel:'supertonic-3',audio}];
+ f.video.currentTime=11;f.syncAudioToVideo();assert.equal(audio.currentTime,1);
+ f.els.speed.value='1.5';f.applyDubSpeed();assert.equal(audio.playbackRate,1.5);assert.equal(audio.currentTime,1);
+ f.video.currentTime=12;f.syncAudioToVideo();assert.equal(audio.currentTime,2.5);assert.equal(audio.playbackRate,1.5);
+ assert.equal(f.dubbingSettingsFromControls().speed,1.15);
+ f.els.speed.value='0.5';f.applyDubSpeed();assert.equal(audio.playbackRate,0.5);
+ f.video.currentTime=13;f.syncAudioToVideo();assert.equal(audio.currentTime,3);assert.equal(plays,1);
+ f.state.playbackHold={reason:'tail'};f.els.speed.value='2';f.applyDubSpeed();assert.equal(audio.playbackRate,2);
+});
+test('playback speed validates invalid values and leaves GPT synthesis speed fixed',async()=>{
+ const f=await contentFixture();for(const x of ['',null,'not-a-number',Infinity])assert.equal(f.normalizeDubSpeed(x),1);
+ assert.equal(f.normalizeDubSpeed(-4),0.5);assert.equal(f.normalizeDubSpeed(8),2);
+ f.els.ttsProvider.value='openai-realtime';f.els.speed.value='1.8';assert.equal(f.dubbingSettingsFromControls().speed,1);
+ const testAudio={playbackRate:1};f.state.testAudio=testAudio;f.applyDubSpeed();assert.equal(testAudio.playbackRate,1.8);
+});
+
+test('slowing a nearly finished clip never replays its tail when media clock trails prediction',async()=>{
+ const f=await contentFixture();let plays=0;const seeks=[];let position=0;
+ const audio={duration:10,paused:true,ended:false,playbackRate:1,get currentTime(){return position;},set currentTime(value){position=value;seeks.push(value);},pause(){this.paused=true;},play(){plays++;this.paused=false;return Promise.resolve();}};
+ f.state.running=true;f.els.speed.value='2';f.state.chunks=[{index:0,start:10,end:30}];
+ f.state.prepared=[{chunkIndex:0,start:10,end:30,ttsModel:'supertonic-3',audio}];
+ f.video.currentTime=12;f.syncAudioToVideo();assert.equal(position,4);
+ f.els.speed.value='0.5';f.applyDubSpeed();
+ for(let i=1;i<=75;i++){
+  f.video.currentTime=12+i*0.16;position=4+i*0.08-0.05;f.syncAudioToVideo();
+ }
+ assert.equal(f.state.currentChunkIndex,0);assert.equal(plays,1);assert.equal(position,9.95);
+ f.video.currentTime=24.16;position=10;audio.ended=true;audio.paused=true;f.syncAudioToVideo();
+ assert.equal(plays,1);assert.deepEqual(seeks,[4]);assert.equal(f.state.currentAudio,audio);
 });

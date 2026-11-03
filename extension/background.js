@@ -1,9 +1,11 @@
-importScripts("page-probe.js");
+importScripts("page-probe.js", "panel-action.js");
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
 const NATIVE_HOST_NAME = "com.youtube_live_dub.backend";
 
 const MESSAGE_HANDLERS = {
+  YLD_SHORTCUTS_GET: async () => chrome.commands.getAll(),
+  YLD_SHORTCUTS_OPEN: async () => { await chrome.tabs.create({url: "chrome://extensions/shortcuts"}); return {opened:true}; },
   YLD_PAGE_PROBE: executePageProbe,
   YLD_BACKEND_HEALTH: ensureBackendHealth,
   YLD_PREPARE_DUB: prepareDub,

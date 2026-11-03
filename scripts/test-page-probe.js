@@ -97,7 +97,7 @@ test('content bridge reports failures without throwing or creating extension scr
   const end = text.indexOf('\n  function handlePageMessage', start);
   for (const sendMessage of [async () => ({ ok: true }), async () => ({ ok: false, error: 'Denied' }),
     async () => { throw new Error('Extension context invalidated'); }]) {
-    const context = vm.createContext({ chrome: { runtime: { sendMessage } }, state: {}, els: {}, renderPlaybackDiagnostics() {} });
+    const context = vm.createContext({ sendRuntimeMessage: sendMessage, chrome: { runtime: { sendMessage } }, state: {}, els: {}, renderPlaybackDiagnostics() {} });
     vm.runInContext(text.slice(start, end), context);
     const ok = await context.injectPageProbe('request', 'install');
     assert.equal(context.state.pageProbeStatus.startsWith(ok ? '연결됨' : '연결 실패:'), true);

@@ -160,6 +160,10 @@ function setButtonsEnabled(enabled) {
 }
 
 async function getActiveTab() {
+  if (typeof location !== "undefined" && location.search) {
+    const sourceTab = Number(new URLSearchParams(location.search).get("sourceTab"));
+    if (Number.isInteger(sourceTab) && sourceTab > 0) return chrome.tabs.get(sourceTab);
+  }
   const tabs = await tabsQuery({ active: true, currentWindow: true });
   const tab = tabs[0];
   if (!tab?.id) {
