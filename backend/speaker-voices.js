@@ -97,7 +97,20 @@ export function createAudioSourceLoader({executeImpl=execute, exists=existsSync,
 const audioSource = createAudioSourceLoader();
 
 // Only validated YouTube ids can reach the download/path layer; never accept a client path.
-export async function classifySpeaker({videoId,start,end}, dependencies = {}) {
+export async function classifySpeaker(request, dependencies = {}) {
+  // Voice matching is optional: loading/downloading must not hold up dubbing.
+  // Keep the in-flight analysis alive so subsequent clips can use its cached result.
+  const budgetMs = Math.max(1, Math.min(4000, Number(dependencies.budgetMs) || 4000));
+  let timer;
+  try {
+    return await Promise.race([
+      classifySpeakerEventually(request, dependencies),
+      new Promise(resolve => { timer = setTimeout(() => resolve(unknown('analysis-pending')), budgetMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+async function classifySpeakerEventually({videoId,start,end}, dependencies = {}) {
   if (!/^[A-Za-z0-9_-]{11}$/.test(videoId) || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return unknown('invalid-source');
   if (!existsSync(model) && !dependencies.analyze) return unknown('model-unavailable');
   if (Date.now() < retryAfter && !dependencies.analyze) return unknown('worker-unavailable');

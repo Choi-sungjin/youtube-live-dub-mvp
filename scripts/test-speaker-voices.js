@@ -78,6 +78,26 @@ test('unavailable source and classifier fail to a declared default without block
   ]) assert.deepEqual(await classifySpeaker(request,dependencies),{label:'unknown',reason:'audio-unavailable'});
 });
 
+test('slow optional speaker analysis returns a default promptly and keeps the eventual result cached', async () => {
+  let finish, calls=0;
+  const deps={budgetMs:20,source:async()=>'/fixture.wav',stat:async()=>({size:9,mtimeMs:1}),analyze:()=>{calls++;return new Promise(resolve=>{finish=resolve;});}};
+  const request={videoId:'slowvoice01',start:0,end:3};
+  const start=performance.now();
+  assert.deepEqual(await classifySpeaker(request,deps),{label:'unknown',reason:'analysis-pending'});
+  assert.ok(performance.now()-start<500);
+  finish({label:'female',confidence:0.99});
+  assert.deepEqual(await classifySpeaker(request,deps),{label:'female',confidence:0.99});
+  assert.equal(calls,1);
+});
+
+test('source acquisition is also bounded and late failures remain handled', async () => {
+  let rejectSource;
+  const result=await classifySpeaker({videoId:'slowsource1',start:0,end:3},{budgetMs:20,source:()=>new Promise((_,reject)=>{rejectSource=reject;}),analyze:()=>{}});
+  assert.deepEqual(result,{label:'unknown',reason:'analysis-pending'});
+  rejectSource(Error('late private source failure'));
+  await new Promise(resolve=>setTimeout(resolve,10));
+});
+
 test('backend uses classified voice in both cache key and synthesis and returns the actual voice',async()=>{
   const source=await readFile(new URL('../backend/server.js',import.meta.url),'utf8');
   const code=source.slice(source.indexOf('async function prepareDub('),source.indexOf('async function fetchYouTubeCaptions('));
