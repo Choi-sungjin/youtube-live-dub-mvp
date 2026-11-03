@@ -258,7 +258,7 @@ async function prepareDub(body, mediaTranscript) {
     contextAfter: transcript.segments.filter(s=>s.start>=segment.end).slice(0,2).map(s=>s.text).join(' ').slice(0,240),
     contextTopic: transcript.segments.filter(s=>s.end>=segment.start-45 && s.start<=segment.end+20).map(s=>s.text).join(' ').slice(-2200),
   }));
-  const speakerResults = settings.autoSpeaker && settings.ttsProvider === 'openai-realtime' && !mediaTranscript && body?.source !== 'self-test'
+  const speakerResults = settings.autoSpeaker && ['openai-realtime', 'supertonic3'].includes(settings.ttsProvider) && !mediaTranscript && body?.source !== 'self-test'
     ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end}))
     : Promise.resolve(limitedSegments.map(() => null));
   const translationStarted = performance.now();
@@ -689,7 +689,7 @@ function normalizeSettings(settings = {}) {
     : String(settings.voice || process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id);
   return {
     mode: settings.mode,
-    autoSpeaker: ttsProvider === 'openai-realtime' && (settings.voice === 'auto' || settings.autoSpeaker === true),
+    autoSpeaker: ['openai-realtime', 'supertonic3'].includes(ttsProvider) && (settings.voice === 'auto' || settings.autoSpeaker === true),
     translationProvider: mode?.translationProvider || activeTranslationProvider(),
     voice,
     tone: String(settings.tone || process.env.SUPERTONE_STYLE || 'neutral'),

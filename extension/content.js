@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.2";
+  const BUILD_VERSION = "0.8.3";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -260,13 +260,13 @@
     try { const saved = localStorage.getItem('yld-dubbing-mode'); if (Object.hasOwn(modes, saved)) selectedMode = saved; } catch {}
     els.panel.dataset.mode = selectedMode;
     els.ttsProvider.disabled = true;
-    const savedVoices = { supertonic3: "M1", "openai-realtime": "auto", supertone: els.voice.value };
+    const savedVoices = { supertonic3: "auto", "openai-realtime": "auto", supertone: els.voice.value };
     let previousSpeechProvider = "supertone";
     const updateSpeechControls = () => {
       const provider = els.ttsProvider.value;
       savedVoices[previousSpeechProvider] = els.voice.value;
       els.voice.innerHTML = provider === "supertonic3"
-        ? ["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"].map(voice => `<option value="${voice}">${voice} · ${voice[0] === "M" ? "남성" : "여성"}</option>`).join("")
+        ? '<option value="auto">자동 · 원본 음색에 맞춤</option>' + ["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"].map(voice => `<option value="${voice}">${voice} · ${voice[0] === "M" ? "남성" : "여성"}</option>`).join("")
         : provider === 'openai-realtime'
           ? '<option value="auto">자동 · 원본 음색에 맞춤</option>' + ['marin','cedar','coral','alloy'].map(voice => `<option value="${voice}">${voice}</option>`).join('')
           : cloudVoices;

@@ -20,8 +20,11 @@ export function speakerStatus() {
 }
 
 export function selectSpeakerVoice(settings, classification) {
-  if (settings.ttsProvider !== 'openai-realtime' || !settings.autoSpeaker) return settings.voice;
-  return classification?.label === 'male' ? 'cedar' : classification?.label === 'female' ? 'marin' : settings.voice;
+  if (!settings.autoSpeaker) return settings.voice;
+  const voices = settings.ttsProvider === 'openai-realtime' ? {male:'cedar',female:'marin'}
+    : settings.ttsProvider === 'supertonic3' ? {male:'M1',female:'F1'} : null;
+  const label = classification?.label;
+  return voices && (label === 'male' || label === 'female') ? voices[label] : settings.voice;
 }
 
 function start() {

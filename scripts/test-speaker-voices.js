@@ -3,6 +3,26 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import { classifySpeaker, selectSpeakerVoice, createAudioSourceLoader } from '../backend/speaker-voices.js';
+import { resolveDubbingMode } from '../backend/dubbing-modes.js';
+
+test('all four mode requests enable auto voice; explicit local voices remain manual', async () => {
+  const source=await readFile(new URL('../backend/server.js',import.meta.url),'utf8');
+  const code=source.slice(source.indexOf('function normalizeSettings('),source.indexOf('function normalizeSegment('));
+  const normalize=runInNewContext(code+';normalizeSettings',{
+    resolveDubbingMode,process:{env:{}},activeTranslationProvider:()=> 'ollama',
+    normalizeProvider:(value,allowed,fallback)=>allowed.includes(value)?value:fallback,
+    OPENAI_VOICES:['cedar','marin','coral','alloy'],OPENAI_VOICE_MODEL:'fixture',
+    SUPERTONE_VOICES:{lowMale:{id:'fixture'}},clamp:(v,min,max)=>Math.min(max,Math.max(min,v)),
+  });
+  for(const mode of ['local','gemma-gpt','gpt-local','gpt']) {
+    const result=normalize({mode,voice:'auto'});
+    assert.equal(result.autoSpeaker,true);
+    assert.equal(result.voice,result.ttsProvider==='supertonic3'?'M1':'marin');
+  }
+  const manual=normalize({mode:'local',voice:'F4'});
+  assert.equal(manual.autoSpeaker,false);assert.equal(manual.voice,'F4');
+  assert.equal(normalize({ttsProvider:'windows-sapi',voice:'auto'}).autoSpeaker,false);
+});
 
 test('source acquisition caps distinct videos at two and failed video intervals share a cooldown', async () => {
   let calls=0, release, clock=1000;
@@ -17,14 +37,17 @@ test('source acquisition caps distinct videos at two and failed video intervals 
   clock+=300001;await assert.rejects(source('00000000000'));assert.equal(calls,3);
 });
 
-test('automatic GPT voices follow audio presentation; manual and local voices stay selected', () => {
+test('automatic GPT and local voices follow audio presentation; manual choices stay selected', () => {
   const settings={ttsProvider:'openai-realtime',autoSpeaker:true,voice:'coral'};
   assert.equal(selectSpeakerVoice(settings,{label:'male'}),'cedar');
   assert.equal(selectSpeakerVoice(settings,{label:'female'}),'marin');
   assert.equal(selectSpeakerVoice(settings,{label:'unknown'}),'coral');
   assert.equal(selectSpeakerVoice(settings,null),'coral');
   assert.equal(selectSpeakerVoice({...settings,autoSpeaker:false},{label:'male'}),'coral');
-  assert.equal(selectSpeakerVoice({...settings,ttsProvider:'supertonic3',voice:'F2'},{label:'male'}),'F2');
+  const local={...settings,ttsProvider:'supertonic3',voice:'M1'};
+  assert.deepEqual(['male','female','male','unknown'].map(label=>selectSpeakerVoice(local,{label})),['M1','F1','M1','M1']);
+  assert.equal(selectSpeakerVoice({...local,voice:'F2',autoSpeaker:false},{label:'male'}),'F2');
+  assert.equal(selectSpeakerVoice({...local,voice:'F2'},{label:'unknown'}),'F2');
 });
 
 test('invalid source ids and intervals cannot reach download or local file access', async () => {
@@ -78,6 +101,12 @@ test('backend uses classified voice in both cache key and synthesis and returns 
   assert.equal(response.segments[0].voiceId,'cedar');assert.equal(response.segments[1].speaker.label,'female');
   settings.autoSpeaker=false;
   await prepare({videoId:'abcdefghijk',settings,segments});assert.equal(classifications,2);
-  settings.autoSpeaker=true;settings.ttsProvider='supertonic3';
-  await prepare({videoId:'abcdefghijk',settings,segments});assert.equal(classifications,2);
+  settings.autoSpeaker=true;settings.ttsProvider='supertonic3';settings.voice='M1';
+  const localResponse=await prepare({videoId:'abcdefghijk',settings,segments});assert.equal(classifications,4);
+  assert.deepEqual(voices.slice(-2),['M1','F1']);
+  assert.equal(keys.at(-2).settings.voice,'M1');assert.equal(keys.at(-1).settings.voice,'F1');
+  assert.equal(localResponse.segments[1].voiceId,'F1');
+  settings.autoSpeaker=false;settings.voice='F3';
+  await prepare({videoId:'abcdefghijk',settings,segments});assert.equal(classifications,4);
+  assert.deepEqual(voices.slice(-2),['F3','F3']);
 });

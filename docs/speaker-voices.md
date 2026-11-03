@@ -1,8 +1,8 @@
-# Automatic GPT voice selection
+# Automatic voice selection
 
-Modes 2 and 4 offer **자동 · 원본 음색에 맞춤** in Voice. The backend analyzes each source audio interval locally on CPU and selects `cedar` for a masculine voice presentation or `marin` for a feminine presentation. This estimates audible voice characteristics, not a person's gender identity. It does not clone the original speaker.
+All four modes offer **자동 · 원본 음색에 맞춤** in Voice. The backend analyzes each source audio interval locally on CPU and selects `cedar` for a masculine voice presentation or `marin` for a feminine presentation in GPT speech modes (2/4). Local Supertonic speech modes (1/3) select `M1` / `F1` respectively. This estimates audible voice characteristics, not a person's gender identity. It does not clone the original speaker.
 
-Uncertain, mixed, silent, too-short or unavailable audio uses the default `marin`. Manual voice choices bypass analysis. Modes 1 and 3 retain their selected Supertonic voice. Actual selected voice and classification appear in playback diagnostics. Existing installations must reload the extension and refresh the YouTube page.
+Uncertain, mixed, silent, too-short or unavailable audio uses the default `marin` for GPT or `M1` for local speech. Manual voice choices bypass analysis. Explicitly selected voices remain fixed in every mode. Actual selected voice and classification appear in playback diagnostics. Existing installations must reload the extension and refresh the YouTube page.
 
 There are no additional OpenAI classification requests. GPT translation and generated speech still incur normal usage costs. First-time source audio acquisition can add up to 60 seconds; cached source audio and interval classifications are reused. New downloads are capped at two concurrent files and 100 MB per file; an unavailable source has a five-minute retry cooldown. Original compressed audio is retained instead of expanding new downloads to WAV. This is interval-level matching, not full speaker diarization: rapid changes within a caption, overlapping speech, music, short samples and accents may cause uncertainty or incorrect classification. Choose a manual voice when needed.
 
@@ -14,4 +14,4 @@ The pinned model is audEERING's `w2v2-L-robust-6-age-gender.25c844af-1.1.1`, fro
 
 ## Validation scope
 
-Automated tests cover manual/local provider isolation, invalid ids/intervals, concurrent cache reuse, source failure, actual voice in cache and synthesis. CPU execution is separately checked with a public YouTube excerpt, synthetic M1/F1 speech, silence and mixed speech. Synthetic sample accuracy is not a benchmark for all real speakers. Browser playback and real API synthesis require separate runtime verification.
+Automated tests cover manual voice isolation and automatic routing across all four modes, invalid ids/intervals, concurrent cache reuse, source failure, actual voice in cache and synthesis. CPU execution is separately checked with a public YouTube excerpt, synthetic M1/F1 speech, silence and mixed speech. Synthetic sample accuracy is not a benchmark for all real speakers. Browser playback and real API synthesis require separate runtime verification.
