@@ -89,6 +89,12 @@
   overflow-wrap: anywhere;
 }
 
+.yld-alert.yld-notice {
+  border-color: rgba(255, 196, 92, 0.4);
+  background: rgba(74, 54, 14, 0.72);
+  color: #ffe8bd;
+}
+
 .yld-row {
   display: grid;
   gap: 5px;

@@ -73,6 +73,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({
         ok: false,
         error: error && error.message ? error.message : String(error),
+        retryable: typeof error?.retryable === "boolean" ? error.retryable : undefined,
       });
     });
 
@@ -160,7 +161,9 @@ async function prepareDub(payload) {
       json && (json.error || json.message)
         ? json.error || json.message
         : `Backend request failed with HTTP ${response.status}`;
-    throw new Error(message);
+    const error = new Error(message);
+    if (typeof json?.retryable === "boolean") error.retryable = json.retryable;
+    throw error;
   }
 
   return json || {};

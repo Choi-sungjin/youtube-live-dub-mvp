@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.5";
+  const BUILD_VERSION = "0.8.6";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -18,6 +18,9 @@
   const MIN_START_BUFFER_SECONDS = 12;
   const MIN_START_BUFFER_CLIPS = 1;
   const SEEK_BUFFER_CLIPS = 2;
+  const PREPARE_RETRY_DELAY_MS = 1500;
+  const PREPARE_ATTEMPTS_PER_CLIP = 2;
+  const MAX_CONSECUTIVE_PREPARE_FAILURES = 6;
   const TEXT_TRACK_WAIT_MS = 4500;
   const CAPTION_FETCH_BUDGET_MS = 3500;
   const PAGE_CAPTION_PRIME_WAIT_MS = 7500;
@@ -58,6 +61,10 @@
     chunks: [],
     prepared: [],
     preparedChunkIndexes: new Set(),
+    skippedChunkIndexes: new Set(),
+    chunkPrepareFailures: new Map(),
+    consecutivePrepareFailures: 0,
+    prepareRetryAt: 0,
     preparingChunks: false,
     currentAudio: null,
     testAudio: null,
@@ -438,7 +445,7 @@
     state.playbackHold = null;
     state.lastSyncVideoTime = null;
     state.transcriptWindows = [];
-    state.metrics = { startedAt: Date.now(), firstAudioMs: null, bufferWaits: 0, bufferWaitMs: 0, tailWaits: 0, lastPrepareMs: 0, playedClips: 0 };
+    state.metrics = { startedAt: Date.now(), firstAudioMs: null, bufferWaits: 0, bufferWaitMs: 0, tailWaits: 0, lastPrepareMs: 0, playedClips: 0, fallbackClips: 0, skippedClips: 0 };
     stopTestAudio();
     state.lastError = "";
     els.start.disabled = true;
@@ -466,6 +473,7 @@
       state.chunks = chunkSegments(segments);
       state.prepared = [];
       state.preparedChunkIndexes = new Set();
+      resetClipRecovery();
       updateMeta(
         state.videoId,
         `${segments.length} segments, ${state.chunks.length} chunks`,
@@ -617,6 +625,7 @@
     if (shouldResume && state.video) state.video.play().catch(() => {});
     state.prepared = [];
     state.preparedChunkIndexes = new Set();
+    resetClipRecovery();
     state.preparingChunks = false;
     state.currentChunkIndex = -1;
     revokeObjectUrls();
@@ -686,6 +695,9 @@
     if (jumped) {
       stopCurrentAudio();
       if (state.playbackHold) state.playbackHold.reason = 'buffer';
+      // A seek gives skipped clips a fresh chance; the consecutive-failure limit still applies.
+      state.skippedChunkIndexes.clear();
+      state.chunkPrepareFailures.clear();
     }
     maybePrepareMoreAudio(videoTime, "sync");
 
@@ -693,7 +705,7 @@
       const speechRemaining = state.currentAudio && !state.currentAudio.ended &&
         state.currentAudio.duration - state.currentAudio.currentTime > 0.08;
       const currentReady = state.prepared.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
-      const noCaptionNow = !state.chunks.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+      const noCaptionNow = !hasDubbedCaptionAt(videoTime);
       const enoughAudio = currentReady && (hasStartBufferReady(videoTime) || !selectUnpreparedChunksForWindow(state.chunks, videoTime).length);
       const naturalGapReady = noCaptionNow && (isTranscriptKnownAt(videoTime) || (!state.transcriptWindows.length && !state.transcriptExpanding));
       if (!speechRemaining && (enoughAudio || naturalGapReady || (state.playbackHold.reason === 'tail' && noCaptionNow))) {
@@ -723,7 +735,7 @@
     const previousItem = state.prepared.find(item => item.chunkIndex === state.currentChunkIndex);
     const previousStillSpeaking = previousItem && state.currentAudio && !state.currentAudio.ended &&
       state.currentAudio.duration - state.currentAudio.currentTime > 0.08;
-    const expectedCaption = state.chunks.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+    const expectedCaption = hasDubbedCaptionAt(videoTime);
     if (!jumped && previousStillSpeaking && nextItem?.chunkIndex !== state.currentChunkIndex) {
       if (expectedCaption) holdPlayback(chunkIndex === -1 ? 'buffer' : 'tail');
       return;
@@ -838,7 +850,7 @@
 
     maybeExpandTranscriptCoverage(videoTime);
 
-    if (state.preparingChunks) {
+    if (state.preparingChunks || Date.now() < state.prepareRetryAt) {
       return;
     }
 
@@ -854,11 +866,22 @@
     }
 
     const currentChunk = state.chunks.find((chunk) => chunk.end > videoTime);
-    const needsCurrentAudio = currentChunk && !state.preparedChunkIndexes.has(currentChunk.index);
+    const needsCurrentAudio = currentChunk && !isChunkCovered(currentChunk.index);
     const requestedChunks = needsCurrentAudio ? nextChunks.slice(0, SEEK_BUFFER_CLIPS) : nextChunks;
     const sessionId = state.sessionId;
     prepareAndAppendChunks(requestedChunks).catch((error) => {
       if (!isActiveSession(sessionId)) return;
+      const recovery = recoverFailedClip(requestedChunks, error);
+      if (recovery) {
+        console.warn(`[YouTube Live Dub MVP] Clip prepare failed; ${recovery === "skip" ? "playing original audio" : "retrying"}.`, error);
+        setStatus(recovery === "skip" ? "ready" : "buffering");
+        updateMeta(
+          state.videoId || "unknown",
+          `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
+          formatAudioState(recovery === "skip" ? `clip left to original audio (${reason})` : `retrying clip (${reason})`, videoTime)
+        );
+        return;
+      }
       console.error("[YouTube Live Dub MVP] Rolling buffer failed.", error);
       state.lastError = error.message || String(error);
       setStatus("error");
@@ -875,10 +898,47 @@
     return state.running && state.sessionId === sessionId;
   }
 
+  function resetClipRecovery() {
+    state.skippedChunkIndexes = new Set();
+    state.chunkPrepareFailures = new Map();
+    state.consecutivePrepareFailures = 0;
+    state.prepareRetryAt = 0;
+  }
+
+  function isChunkCovered(index) {
+    return state.preparedChunkIndexes.has(index) || state.skippedChunkIndexes.has(index);
+  }
+
+  function captionChunkAt(videoTime, skipped) {
+    return state.chunks.some(item => state.skippedChunkIndexes.has(item.index) === skipped &&
+      videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+  }
+
+  // Clips left to the original audio count as caption gaps, so playback never waits for them.
+  function hasDubbedCaptionAt(videoTime) { return captionChunkAt(videoTime, false); }
+  function isSkippedClipAt(videoTime) { return captionChunkAt(videoTime, true); }
+
+  // One failed clip should not end the whole dub: retry it once, then leave it to the original
+  // audio and move on. Errors the user must fix, or a lasting outage, still stop the dub.
+  function recoverFailedClip(chunks, error) {
+    if (error?.retryable === false) return "";
+    state.consecutivePrepareFailures++;
+    if (state.consecutivePrepareFailures > MAX_CONSECUTIVE_PREPARE_FAILURES) return "";
+    const chunk = chunks.find(item => !isChunkCovered(item.index));
+    if (!chunk) return "";
+    const attempts = (state.chunkPrepareFailures.get(chunk.index) || 0) + 1;
+    state.chunkPrepareFailures.set(chunk.index, attempts);
+    state.prepareRetryAt = Date.now() + PREPARE_RETRY_DELAY_MS;
+    if (attempts < PREPARE_ATTEMPTS_PER_CLIP) return "retry";
+    state.skippedChunkIndexes.add(chunk.index);
+    if (state.metrics) state.metrics.skippedClips++;
+    return "skip";
+  }
+
   async function prepareAndAppendChunks(chunks) {
     const sessionId = state.sessionId;
     const pending = chunks
-      .filter((chunk) => !state.preparedChunkIndexes.has(chunk.index))
+      .filter((chunk) => !isChunkCovered(chunk.index))
       .slice(0, MAX_PREPARE_CHUNKS);
 
     if (!pending.length) {
@@ -921,7 +981,10 @@
       prepared.filter(item => !validPrepared.includes(item)).forEach(item => item.audio?.pause());
       validPrepared.forEach((item) => {
         state.preparedChunkIndexes.add(item.chunkIndex);
+        state.chunkPrepareFailures.delete(item.chunkIndex);
       });
+      state.consecutivePrepareFailures = 0;
+      if (state.metrics) state.metrics.fallbackClips += validPrepared.filter(item => item.fallback).length;
       state.prepared = state.prepared
         .concat(validPrepared)
         .sort((a, b) => a.start - b.start);
@@ -1175,7 +1238,9 @@
     });
 
     if (!response || !response.ok) {
-      throw new Error(response && response.error ? response.error : "Backend request failed.");
+      const error = new Error(response && response.error ? response.error : "Backend request failed.");
+      if (typeof response?.retryable === "boolean") error.retryable = response.retryable;
+      throw error;
     }
 
     return response.payload || {};
@@ -2223,6 +2288,7 @@
     if (!validIndexes.has(state.currentChunkIndex)) stopCurrentAudio();
     state.prepared = state.prepared.filter(item => validIndexes.has(item.chunkIndex));
     state.preparedChunkIndexes = new Set(state.prepared.map(item => item.chunkIndex));
+    state.skippedChunkIndexes = new Set([...state.skippedChunkIndexes].filter(index => validIndexes.has(index)));
     const nextLastEnd = getLastSegmentEnd(merged);
     state.transcriptTargetDuration = Math.max(state.transcriptTargetDuration, nextLastEnd);
     updateMeta(
@@ -2644,7 +2710,7 @@
 
   function selectUnpreparedChunksForWindow(chunks, currentTime) {
     return selectChunksForWindow(chunks, currentTime)
-      .filter((chunk) => !state.preparedChunkIndexes.has(chunk.index))
+      .filter((chunk) => !isChunkCovered(chunk.index))
       .slice(0, MAX_PREPARE_CHUNKS);
   }
 
@@ -2652,7 +2718,7 @@
     const safeTime = Number.isFinite(videoTime) ? videoTime : getVideoTime();
     const bufferInfo = getBufferInfo(safeTime);
     const nextChunk = state.chunks.find((chunk) => {
-      return !state.preparedChunkIndexes.has(chunk.index) && chunk.end >= safeTime;
+      return !isChunkCovered(chunk.index) && chunk.end >= safeTime;
     });
     const nextText = nextChunk
       ? `next ${nextChunk.index + 1}@${formatTime(nextChunk.start)}`
@@ -2682,7 +2748,7 @@
     for (const chunk of state.chunks) {
       if (chunk.end <= videoTime) continue;
       if (chunk.start >= coverageEnd) break;
-      if (!state.preparedChunkIndexes.has(chunk.index)) break;
+      if (!isChunkCovered(chunk.index)) break;
       preparedEnd = Math.max(preparedEnd, Math.min(chunk.end, coverageEnd));
     }
     return preparedEnd;
@@ -2753,6 +2819,7 @@
           voiceId: item.voiceId || "",
           speaker: item.speaker || null,
           speechSpeed: Number(item.speechSpeed || 1),
+          fallback: item.fallback || null,
           audio: null,
         };
       })
@@ -3132,8 +3199,10 @@
       return;
     }
 
-    const volumePercent = Math.max(0, Math.min(100, Number(els.volume.value) || 0));
-    const muted = volumePercent === 0;
+    // A clip left to the original audio plays at the volume the viewer had before dubbing.
+    const originalNow = state.running && state.originalVideoVolume !== null && isSkippedClipAt(getVideoTime());
+    const volumePercent = originalNow ? Math.round(state.originalVideoVolume * 100) : Math.max(0, Math.min(100, Number(els.volume.value) || 0));
+    const muted = originalNow ? Boolean(state.originalMuted) : volumePercent === 0;
 
     state.video.volume = volumePercent / 100;
     state.video.muted = muted;
@@ -3193,6 +3262,8 @@
       item?.translatedText ? `번역: ${item.translatedText}` : "",
       state.metrics ? `첫 더빙: ${state.metrics.firstAudioMs === null ? '준비 중' : (state.metrics.firstAudioMs / 1000).toFixed(2) + '초'} · 최근 준비: ${(state.metrics.lastPrepareMs / 1000).toFixed(2)}초` : "",
       state.metrics ? `버퍼 대기: ${state.metrics.bufferWaits}회 · 문장 끝 보존: ${state.metrics.tailWaits}회 · 재생 클립: ${state.metrics.playedClips}` : "",
+      state.metrics?.fallbackClips || state.metrics?.skippedClips ? `대체 재생: 로컬 엔진 ${state.metrics.fallbackClips}개 · 원음 ${state.metrics.skippedClips}개` : "",
+      item?.fallback ? `대체 사유: ${item.fallback.voice || item.fallback.translation}` : "",
       state.playbackHold ? (state.playbackHold.reason === 'tail' ? '문장을 끝까지 읽은 뒤 영상 재개' : '더빙 준비 후 영상과 함께 재개') : "",
     ].filter(Boolean).join("\n");
   }
@@ -3203,13 +3274,26 @@
     }
 
     if (!state.lastError) {
-      els.alert.hidden = true;
-      els.alert.textContent = "";
+      const notice = degradedNotice();
+      els.alert.hidden = !notice;
+      els.alert.classList?.toggle("yld-notice", Boolean(notice));
+      els.alert.textContent = notice;
       return;
     }
 
+    els.alert.classList?.remove("yld-notice");
     els.alert.hidden = false;
     els.alert.textContent = state.connectionLost ? state.lastError : `Error: ${state.lastError}`;
+  }
+
+  // Fallback and skipped clips are not errors, but the viewer should know the voice changed.
+  function degradedNotice() {
+    const metrics = state.running ? state.metrics : null;
+    const parts = [
+      metrics?.fallbackClips ? `로컬 엔진 ${metrics.fallbackClips}개` : "",
+      metrics?.skippedClips ? `원음 ${metrics.skippedClips}개` : "",
+    ].filter(Boolean);
+    return parts.length ? `OpenAI 연결이 불안정해 일부 구간을 대신 재생했어요 (${parts.join(" · ")}).` : "";
   }
 
   function cleanCaptionText(text) {
