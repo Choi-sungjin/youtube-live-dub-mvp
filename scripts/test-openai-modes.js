@@ -148,3 +148,57 @@ test('GPT translation cache separates identical captions with different precedin
   assert.notEqual(bird,machine);
   assert.equal(bird,key({...base,contextBefore:'We are watching birds.'},{targetLang:'ko'},'openai'));
 });
+test('GPT translation retries dropped connections and cut-off streams, then names the cause', async () => {
+  const ok=()=>({ok:true,body:stream([{type:'response.output_text.delta',delta:'다시 연결됐어요.'},{type:'response.completed'}])});
+  const reset=()=>{throw new TypeError('fetch failed',{cause:Object.assign(new Error('read ECONNRESET'),{code:'ECONNRESET'})});};
+  const cut=()=>({ok:true,body:stream([{type:'response.output_text.delta',delta:'다시'}])});
+  for(const first of [reset,cut]) {
+    let calls=0; const fetchImpl=async()=>(++calls===1?first():ok());
+    const result=await translateOpenAI([{index:0,text:'Reconnected.'}],{targetLang:'ko'},{},{fetchImpl,apiKey:'test-only',retryDelaysMs:[0,0]});
+    assert.equal(result.get(0),'다시 연결됐어요.'); assert.equal(calls,2);
+  }
+  let calls=0;
+  await assert.rejects(translateOpenAI([{index:0,text:'x'}],{targetLang:'ko'},{},{fetchImpl:async()=>{calls++;reset();},apiKey:'test-only',retryDelaysMs:[0,0]}),
+    e=>/translation connection failed \(ECONNRESET\).*\(3 attempts\)/.test(e.message)&&e.retryable===true);
+  assert.equal(calls,3);
+});
+test('GPT translation fails fast on quota and key errors without echoing the provider message', async () => {
+  for(const [status,code,pattern] of [[429,'insufficient_quota',/insufficient_quota.*billing/],[401,'invalid_api_key',/HTTP 401.*OPENAI_API_KEY/]]) {
+    let calls=0;
+    const fetchImpl=async()=>{calls++;return {ok:false,status,json:async()=>({error:{code,message:'Incorrect API key provided: test-only'}})};};
+    await assert.rejects(translateOpenAI([{index:0,text:'x'}],{targetLang:'ko'},{},{fetchImpl,apiKey:'test-only',retryDelaysMs:[0,0]}),
+      e=>pattern.test(e.message)&&e.retryable===false&&!e.message.includes('test-only'));
+    assert.equal(calls,1);
+  }
+});
+async function serverFallbackHelpers() {
+  const {readFile} = await import('node:fs/promises');
+  const {runInNewContext} = await import('node:vm');
+  const source = await readFile(new URL('../backend/server.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('const LOCAL_VOICE_FOR_OPENAI'), source.indexOf('async function translateSegments('));
+  const warnings = [];
+  return {warnings, ...runInNewContext(code+'; ({preferOpenAI, localVoiceSettings})', {Date, console:{warn:m=>warnings.push(m)}})};
+}
+test('OpenAI outage falls back to the local engine, then skips OpenAI briefly', async () => {
+  const {preferOpenAI, warnings} = await serverFallbackHelpers();
+  const outage = Object.assign(new Error('OpenAI voice connection failed (ETIMEDOUT).'), {retryable:true});
+  let openai = 0;
+  const first = await preferOpenAI(async()=>{openai++;throw outage;}, async()=>'local clip');
+  assert.equal(first.value,'local clip'); assert.match(first.fallback,/ETIMEDOUT/); assert.equal(warnings.length,1);
+  const second = await preferOpenAI(async()=>{openai++;return 'gpt clip';}, async()=>'local clip');
+  assert.equal(second.value,'local clip'); assert.match(second.fallback,/moments ago/); assert.equal(openai,1);
+});
+test('OpenAI key errors are not hidden by the fallback, and a failed fallback keeps the real cause', async () => {
+  const {preferOpenAI} = await serverFallbackHelpers();
+  let local = 0;
+  await assert.rejects(preferOpenAI(async()=>{throw Object.assign(new Error('OpenAI voice rejected the API key'),{retryable:false});}, async()=>{local++;}), /rejected the API key/);
+  assert.equal(local,0);
+  await assert.rejects(preferOpenAI(async()=>{throw Object.assign(new Error('OpenAI translation connection failed (ECONNRESET).'),{retryable:true});}, async()=>{throw new Error('Ollama is not running');}),
+    e=>/ECONNRESET.*Local fallback failed: Ollama is not running/.test(e.message)&&e.retryable===true);
+});
+test('local fallback voice keeps the selected speaker gender and Supertonic speed', async () => {
+  const {localVoiceSettings} = await serverFallbackHelpers();
+  const male = localVoiceSettings({voice:'cedar',ttsProvider:'openai-realtime',speed:1,targetLang:'ko'});
+  assert.equal(male.voice,'M1'); assert.equal(male.ttsProvider,'supertonic3'); assert.equal(male.ttsModel,'supertonic-3'); assert.equal(male.speed,1.15); assert.equal(male.targetLang,'ko');
+  assert.equal(localVoiceSettings({voice:'marin'}).voice,'F1');
+});

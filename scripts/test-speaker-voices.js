@@ -113,6 +113,7 @@ test('backend uses classified voice in both cache key and synthesis and returns 
     path:{join:(...p)=>p.join('/')},AUDIO_DIR:'/fixture',fileExists:async()=>false,
     synthesizeSpeech:async({settings})=>{voices.push(settings.voice);return {duration:2};},
     clamp:x=>x,roundTime:x=>x,HOST:'localhost',PORT:1,providerInfo:()=>({}),buildWarnings:()=>[],
+    preferOpenAI:async useOpenAI=>({value:await useOpenAI(),fallback:''}),
   });
   const segments=[{index:0,start:0,end:3,text:'First'},{index:1,start:3,end:6,text:'Second'}];
   const response=await prepare({videoId:'abcdefghijk',settings,segments});
