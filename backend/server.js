@@ -175,6 +175,7 @@ const server = createServer(async (req, res) => {
     json(res, 404, { error: 'Not found' });
   } catch (error) {
     const status = error.statusCode || (error.code === 'ENOENT' ? 404 : 500);
+    if (status >= 500) console.warn(`${req.method} ${String(req.url || '').split('?')[0]} failed (${status}): ${error.message}`);
     json(res, status, {
       error: error.message || 'Unexpected server error'
     });
