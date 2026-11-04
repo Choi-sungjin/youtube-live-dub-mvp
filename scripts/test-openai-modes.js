@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { resolveDubbingMode } from '../backend/dubbing-modes.js';
 import { readResponseStream, translateOpenAI, synthesizeOpenAISpeech, pcmWave } from '../backend/openai-audio.js';
 
@@ -80,9 +81,55 @@ test('Realtime audio writes a valid 24 kHz WAV only after response completion', 
 test('disconnected, incomplete or errored Realtime streams leave no playable partial cache',async()=>{
   const dir=await mkdtemp(path.join(tmpdir(),'yld-openai-failure-'));
   try {
-    for(const kind of ['disconnect','incomplete','error']) await assert.rejects(synthesizeOpenAISpeech({text:'안녕하세요.',settings:{voice:'marin'},outputPath:path.join(dir,'partial.wav')},{apiKey:'test-only',Socket:socketFixture(kind)}), e=>!e.message.includes('secret must never leak'));
+    for(const kind of ['disconnect','incomplete','error']) await assert.rejects(synthesizeOpenAISpeech({text:'안녕하세요.',settings:{voice:'marin'},outputPath:path.join(dir,'partial.wav')},{apiKey:'test-only',Socket:socketFixture(kind),retryDelaysMs:[0,0]}), e=>!e.message.includes('secret must never leak'));
     assert.deepEqual(await readdir(dir),[]);
   } finally {await rm(dir,{recursive:true,force:true});}
+});
+function failingSocket(kind) {
+  return class extends EventEmitter {
+    readyState=0;
+    constructor() {
+      super();
+      queueMicrotask(()=>{
+        if(kind==='reset') return this.emit('error',Object.assign(new Error('read ECONNRESET'),{code:'ECONNRESET'}));
+        const [status,code]={http401:[401,'invalid_api_key'],http404:[404,'model_not_found'],quota:[429,'insufficient_quota'],rate:[429,'rate_limit_exceeded'],http503:[503,'']}[kind];
+        const res=Object.assign(Readable.from([Buffer.from(JSON.stringify({error:{code,message:'Incorrect API key provided: test-only'}}))]),{statusCode:status});
+        this.emit('unexpected-response',{},res);
+      });
+    }
+    close() {this.readyState=3;}
+    terminate() {this.readyState=3;}
+  };
+}
+function socketSequence(kinds) {
+  const state={calls:0};
+  state.Socket=function(url,opts) { const kind=kinds[Math.min(state.calls++,kinds.length-1)]; return new (kind==='complete'?socketFixture('complete'):failingSocket(kind))(url,opts); };
+  return state;
+}
+test('Realtime voice retries a transient connection failure and still writes one WAV', async () => {
+  const dir=await mkdtemp(path.join(tmpdir(),'yld-openai-retry-'));
+  try {
+    for(const first of ['reset','rate','http503']) {
+      const seq=socketSequence([first,'complete']); const outputPath=path.join(dir,`${first}.wav`);
+      const result=await synthesizeOpenAISpeech({text:'안녕하세요.',settings:{voice:'marin'},outputPath},{apiKey:'test-only',Socket:seq.Socket,retryDelaysMs:[0,0]});
+      assert.equal(seq.calls,2); assert.equal(result.duration,0.1);
+    }
+    assert.deepEqual((await readdir(dir)).sort(),['http503.wav','rate.wav','reset.wav']);
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
+test('Realtime voice names the real cause, fails fast on key/access/quota and never echoes provider text', async () => {
+  const run=kinds=>{ const seq=socketSequence(kinds); return {seq,promise:synthesizeOpenAISpeech({text:'안녕하세요.',settings:{voice:'marin'},outputPath:path.join(tmpdir(),'never-written.wav')},{apiKey:'test-only',Socket:seq.Socket,retryDelaysMs:[0,0]})}; };
+  for(const [kind,pattern] of [['http401',/HTTP 401.*OPENAI_API_KEY/],['http404',/HTTP 404.*model access/],['quota',/insufficient_quota.*billing/]]) {
+    const {seq,promise}=run([kind]);
+    await assert.rejects(promise,e=>pattern.test(e.message)&&!e.message.includes('Incorrect API key')&&!e.message.includes('test-only'));
+    assert.equal(seq.calls,1);
+  }
+  const {seq,promise}=run(['reset']);
+  await assert.rejects(promise,/ECONNRESET.*\(3 attempts\)/);
+  assert.equal(seq.calls,3);
+  // The live API upgrades first and reports a bad key as an error event; it must get the same guidance.
+  await assert.rejects(synthesizeOpenAISpeech({text:'안녕하세요.',settings:{voice:'marin'},outputPath:path.join(tmpdir(),'never-written.wav')},{apiKey:'test-only',Socket:socketFixture('error'),retryDelaysMs:[0,0]}),
+    e=>/invalid_api_key.*OPENAI_API_KEY/.test(e.message)&&!/attempts/.test(e.message)&&!e.message.includes('secret must never leak'));
 });
 test('empty and odd-length PCM are rejected instead of producing corrupt WAV files',()=>{
   assert.throws(()=>pcmWave(Buffer.alloc(0)),/invalid/);assert.throws(()=>pcmWave(Buffer.alloc(3)),/invalid/);
