@@ -49,7 +49,7 @@ function start() {
   return record;
 }
 
-export async function transcribeFast({ inputPath, model = 'tiny', language = 'auto' }) {
+export async function transcribeFast({ inputPath, model = 'tiny', language = 'auto', lowLatency = false }) {
   const record = await start().readyPromise;
   if (record.pending.size >= 4) throw new Error('STT queue is full');
   const id = randomUUID();
@@ -59,6 +59,6 @@ export async function transcribeFast({ inputPath, model = 'tiny', language = 'au
       record.child.kill();
     }, 180000);
     record.pending.set(id, { resolve, reject, timer });
-    record.child.stdin.write(`${JSON.stringify({ id, inputPath, model, language })}\n`);
+    record.child.stdin.write(`${JSON.stringify({ id, inputPath, model, language, lowLatency })}\n`);
   });
 }

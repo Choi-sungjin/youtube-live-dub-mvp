@@ -19,14 +19,14 @@ def prepare_supertonic():
     print("Supertonic 3 synthesis passed at 1.15x.", flush=True)
 
 
-def prepare_stt(device):
+def prepare_stt(device, requested_model=None):
     # Keep DLL directory handles alive through inference, as in stt-worker.py.
     cuda_runtime = runpy.run_path(str(Path(__file__).resolve().parents[1] / "backend/cuda-runtime.py"))
     import numpy as np
     from faster_whisper import WhisperModel
     from faster_whisper.utils import download_model
 
-    model_name = "large-v3-turbo" if device == "cuda" else "small"
+    model_name = requested_model or ("large-v3-turbo" if device == "cuda" else "small")
     compute = "int8_float16" if device == "cuda" else "int8"
     local_model = download_model(model_name)
     model = WhisperModel(local_model, device=device, device_index=0,
@@ -43,11 +43,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("engine", choices=("supertonic", "stt"))
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--model", choices=("base", "small", "large-v3-turbo"))
     args = parser.parse_args()
     if args.engine == "supertonic":
         prepare_supertonic()
     else:
-        prepare_stt(args.device)
+        prepare_stt(args.device, args.model)
 
 
 if __name__ == "__main__":

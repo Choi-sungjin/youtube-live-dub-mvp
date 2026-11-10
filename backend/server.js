@@ -1,4 +1,4 @@
-import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker } from './speaker-voices.js';
+import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker, analyzeCapturedSpeakers } from './speaker-voices.js';
 import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
 import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_VOICE_MODEL, OPENAI_VOICES } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
@@ -75,7 +75,7 @@ const apiSettingsHandler = createApiSettingsHandler({ filename: PANEL_API_FILE, 
   translate: translateOpenAI, synthesize: synthesizeOpenAISpeech,
   audioDir: AUDIO_DIR, audioBaseUrl: `http://${HOST}:${PORT}/audio`,
 }) });
-const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast });
+const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast, analyzeSpeakers: analyzeCapturedSpeakers });
 const mediaRoute = createMediaRouter({ root: ROOT_DIR, transcribe: transcribeFast, prepare: prepareDub });
 
 const server = createServer(async (req, res) => {
@@ -128,6 +128,18 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/dub/prepare') {
       const body = await readJson(req);
+      if (body.stream === true) {
+        res.writeHead(200, {'Content-Type':'application/x-ndjson', 'Cache-Control':'no-store'});
+        try {
+          const result = await prepareDub(body, undefined, item => {
+            if (!res.destroyed) res.write(JSON.stringify({type:'segment',item})+'\n');
+          });
+          if (!res.destroyed) res.end(JSON.stringify({type:'done',result})+'\n');
+        } catch (error) {
+          if (!res.destroyed) res.end(JSON.stringify({type:'error',error:error.message})+'\n');
+        }
+        return;
+      }
       const result = await prepareDub(body);
       if (process.env.YLD_AUDIT === '1') await appendFile(path.join(AUDIT_DIR, `${hashValue(result.videoId)}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n');
       json(res, 200, result);
@@ -254,11 +266,12 @@ function providerInfo() {
   };
 }
 
-async function prepareDub(body, mediaTranscript) {
+async function prepareDub(body, mediaTranscript, onPrepared) {
   const requestStarted = performance.now();
   const timings = {};
   const videoId = String(body?.videoId || '').trim();
   const settings = normalizeSettings(body?.settings);
+  settings.speechSteps = body?.source === "youtube-buffered" ? 5 : 8;
   const inputSegments = Array.isArray(body?.segments) ? body.segments : [];
   const segments = applyVerifiedCaptionTerms(videoId, inputSegments.map((segment, index) => normalizeSegment(segment, index)).filter(Boolean));
 
@@ -280,7 +293,8 @@ async function prepareDub(body, mediaTranscript) {
     contextTopic: transcript.segments.filter(s=>s.end>=segment.start-45 && s.start<=segment.end+20).map(s=>s.text).join(' ').slice(-2200),
   }));
   const speakerResults = settings.autoSpeaker && ['openai-realtime', 'supertonic3'].includes(settings.ttsProvider) && !mediaTranscript && body?.source !== 'self-test'
-    ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end}))
+    ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end, speakerKey:segment.speakerKey,
+      allowDownload: !['youtube-buffered', 'youtube-captured'].includes(body?.source)}))
     : Promise.resolve(limitedSegments.map(() => null));
   const translationStarted = performance.now();
   const translated = await translateSegments(limitedSegments, settings, timings);
@@ -336,7 +350,7 @@ async function prepareDub(body, mediaTranscript) {
       audioTranscript = result.transcript ?? null;
     }
 
-    return {
+    const completed = {
       hit: exists,
       item: {
         id,
@@ -360,6 +374,8 @@ async function prepareDub(body, mediaTranscript) {
         ttsModel: actualTtsModel
       }
     };
+    onPrepared?.(completed.item);
+    return completed;
   });
 
   const hits = preparedItems.filter((result) => result.hit).length;
@@ -740,7 +756,8 @@ function normalizeSegment(segment, fallbackIndex) {
     index,
     start: Math.max(0, roundTime(start)),
     end: Math.max(0.25, roundTime(end)),
-    text
+    text,
+    ...(typeof segment.speakerKey === 'string' && /^[a-f0-9-]{36}$/.test(segment.speakerKey) ? {speakerKey:segment.speakerKey} : {})
   };
 }
 
@@ -1192,6 +1209,7 @@ function cacheableSettings(settings) {
     targetLang: settings.targetLang,
     ttsModel: settings.ttsModel,
     ttsProvider: settings.ttsProvider,
+    speechSteps: settings.ttsProvider === "supertonic3" ? settings.speechSteps : undefined,
     translationProvider: settings.translationProvider
   };
 }

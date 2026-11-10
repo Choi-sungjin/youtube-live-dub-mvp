@@ -24,7 +24,7 @@ try:
         from supertonic import TTS
         started = time.perf_counter()
         tts = TTS(model="supertonic-3", auto_download=False,
-                  intra_op_num_threads=4, inter_op_num_threads=1)
+                  intra_op_num_threads=int(os.environ.get("SUPERTONIC_THREADS", "2" if sys.platform == "darwin" else "4")), inter_op_num_threads=1)
         styles = {name: tts.get_voice_style(voice_name=name)
                   for name in [f"{gender}{i}" for gender in ("M", "F") for i in range(1, 6)]}
     reply({"ready": True, "model": "supertonic-3", "loadMs": round((time.perf_counter()-started)*1000)})
@@ -45,12 +45,15 @@ for line in sys.stdin:
         speed = float(request.get("speed", 1.15))
         if not 0.7 <= speed <= 2:
             raise ValueError("Supertonic speed must be between 0.7 and 2.")
+        steps = int(request.get("steps", 8))
+        if steps not in (5, 8):
+            raise ValueError("Unsupported speech quality setting.")
         output = Path(request["outputPath"]).resolve()
         temporary = output.with_name(output.name + "." + uuid.uuid4().hex + ".wav")
         started = time.perf_counter()
         with contextlib.redirect_stdout(sys.stderr):
             wav, duration = tts.synthesize(text, voice_style=styles[voice], lang=request.get("language", "ko"),
-                                           total_steps=8, speed=speed, verbose=False)
+                                           total_steps=steps, speed=speed, verbose=False)
             tts.save_audio(wav, str(temporary))
             trimmed_duration = trim_speech_file(temporary)
         os.replace(temporary, output)

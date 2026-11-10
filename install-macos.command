@@ -21,7 +21,7 @@ node scripts/macos-local.mjs configure
 node scripts/macos-local.mjs ollama
 node scripts/macos-local.mjs install-model
 .venv/bin/python scripts/setup-models.py supertonic
-.venv/bin/python scripts/setup-models.py stt --device cpu
+.venv/bin/python scripts/setup-models.py stt --device cpu --model base
 if [[ "${YLD_INSTALL_SPEAKER:-0}" == 1 ]]; then
   .venv/bin/python scripts/setup-speaker-model.py
 fi

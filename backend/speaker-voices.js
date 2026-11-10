@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { capturedSpeakerEvidence } from './speaker-segments.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const model = path.join(root, 'backend/.cache/speaker-model/model.onnx');
@@ -53,7 +54,7 @@ function start() {
     }
     const pending = record.pending.get(message.id);if(!pending)return;
     record.pending.delete(message.id);clearTimeout(pending.timer);
-    if (message.ok) pending.resolve({label:message.label,confidence:message.confidence,reason:message.reason});
+    if (message.ok) pending.resolve(message.turns ? {turns:message.turns,inferenceMs:message.inferenceMs} : {label:message.label,confidence:message.confidence,reason:message.reason});
     else pending.reject(new Error('Speaker classification failed'));
   });
   return record;
@@ -61,6 +62,20 @@ function start() {
 
 export function closeSpeaker() {
   runtime?.fail(new Error('Speaker worker shutting down'));
+}
+
+export async function analyzeCapturedSpeakers({inputPath, duration}) {
+  if (!existsSync(model) || Date.now() < retryAfter) return {turns:[], reason:'model-unavailable'};
+  try {
+    const record = await startWorker();
+    if (record.pending.size >= 6) return {turns:[], reason:'queue-full'};
+    const id = randomUUID();
+    return await new Promise((resolve,reject) => {
+      const timer = setTimeout(() => record.fail(new Error('Speaker analysis timeout')), 30000);
+      record.pending.set(id,{resolve,reject,timer});
+      record.child.stdin.write(JSON.stringify({id,inputPath,start:0,duration,timeline:true})+'\n');
+    });
+  } catch { return {turns:[], reason:'analysis-unavailable'}; }
 }
 
 export function createAudioSourceLoader({executeImpl=execute, exists=existsSync, mkdirImpl=mkdir, now=Date.now} = {}) {
@@ -98,6 +113,9 @@ const audioSource = createAudioSourceLoader();
 
 // Only validated YouTube ids can reach the download/path layer; never accept a client path.
 export async function classifySpeaker(request, dependencies = {}) {
+  const captured = capturedSpeakerEvidence.resolve(request);
+  if (captured) return captured;
+  if (request.speakerKey || request.allowDownload === false) return unknown('captured-analysis-unavailable');
   // Voice matching is optional: loading/downloading must not hold up dubbing.
   // Keep the in-flight analysis alive so subsequent clips can use its cached result.
   const budgetMs = Math.max(1, Math.min(4000, Number(dependencies.budgetMs) || 4000));

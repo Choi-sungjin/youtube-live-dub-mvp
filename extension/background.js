@@ -133,7 +133,7 @@ function formatNativeHostError(message) {
   return text;
 }
 
-async function prepareDub(payload) {
+async function prepareDub(payload, sender) {
   const backendUrl = normalizeBackendUrl(payload && payload.backendUrl);
   const cleanPayload = { ...payload };
   delete cleanPayload.backendUrl;
@@ -147,6 +147,30 @@ async function prepareDub(payload) {
     body: JSON.stringify(cleanPayload),
   });
 
+  if (payload?.stream === true && response.ok && response.headers.get('content-type')?.includes('application/x-ndjson')) {
+    if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId) throw new Error('Invalid streaming recipient.');
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let pending = '', result;
+    while (true) {
+      const chunk = await reader.read();
+      pending += decoder.decode(chunk.value || new Uint8Array(), {stream:!chunk.done});
+      if (pending.length > 2000000) throw new Error('Audio preparation response too large.');
+      let newline;
+      while ((newline = pending.indexOf('\n')) !== -1) {
+        const line = pending.slice(0,newline); pending=pending.slice(newline+1);
+        if (!line) continue;
+        const event = JSON.parse(line);
+        if (event.type === 'error') throw new Error(event.error || 'Speech preparation failed.');
+        if (event.type === 'done') result=event.result;
+        if (event.type === 'segment') await chrome.tabs.sendMessage(sender.tab.id, {
+          type:'YLD_PREPARE_PROGRESS', requestId:payload.requestId, item:event.item,
+        }, {documentId:sender.documentId}).catch(()=>{});
+      }
+      if (chunk.done) break;
+    }
+    if (!result) throw new Error('Incomplete audio preparation stream.');
+    return result;
+  }
   const text = await response.text();
   let json = null;
 
@@ -315,15 +339,28 @@ function normalizeBackendUrl(value) {
 async function transcribeCapture(payload, sender) {
   const url = new URL(sender?.url || "about:blank");
   if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 ||
-      url.protocol !== "https:" || !["www.youtube.com", "youtube.com"].includes(url.hostname) || url.port ||
-      url.searchParams.get("v") !== payload?.videoId) throw new Error("Invalid capture sender.");
+      !sender.documentId || url.protocol !== "https:" || !["www.youtube.com", "youtube.com"].includes(url.hostname) || url.port) {
+    throw new Error("현재 유튜브 탭의 더빙 패널에서 다시 시작해 주세요.");
+  }
+  // sender.url can retain the document's original URL after YouTube SPA
+  // navigation. Read the live URL in that exact document, never a payload tab.
+  const frames = await chrome.scripting.executeScript({target:{tabId:sender.tab.id,documentIds:[sender.documentId]},
+    func:() => location.href});
+  const frame = frames?.find(item => item.documentId === sender.documentId && item.frameId === 0);
+  let current;
+  try { current = new URL(frame?.result); } catch {}
+  if (!current || current.protocol !== 'https:' || !['www.youtube.com','youtube.com'].includes(current.hostname) ||
+      current.port || current.pathname !== '/watch' || current.searchParams.get('v') !== payload?.videoId ||
+      !/^[A-Za-z0-9_-]{11}$/.test(payload?.videoId || '')) {
+    throw new Error("영상이 변경되어 이전 원음 요청을 취소했습니다. 현재 영상에서 Start를 눌러 주세요.");
+  }
   const backendUrl = normalizeBackendUrl(payload.backendUrl);
   if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(backendUrl)) throw new Error("Capture requires a local backend.");
-  if (typeof payload.audio !== "string" || payload.audio.length > 1400000) throw new Error("Invalid capture size.");
+  if (typeof payload.audio !== "string" || payload.audio.length > (payload.buffered === true ? 11184812 : 1400000)) throw new Error("Invalid capture size.");
   const response = await fetch(`${backendUrl}/api/captions/capture`, {
     method: "POST", credentials: "omit", signal: AbortSignal.timeout(180000),
     headers: { "content-type": "application/json", "x-yld-capture": "1" },
-    body: JSON.stringify({ videoId: payload.videoId, start: payload.start, end: payload.end, audio: payload.audio }),
+    body: JSON.stringify({ videoId: payload.videoId, start: payload.start, end: payload.end, audio: payload.audio, buffered: payload.buffered === true, autoSpeaker: payload.autoSpeaker === true }),
   });
   return readJsonResponse(response, "Original audio transcription");
 }
