@@ -61,6 +61,8 @@ function recorderFixture() {
   };
   class Recorder {
     start() { this.state = 'recording'; }
+    pause() { this.state = 'paused'; }
+    resume() { this.state = 'recording'; }
     stop() { this.state = 'inactive'; this.ondataavailable({ data: new Blob(['source audio']) }); this.onstop(); }
   }
   const state = { videoId: body.videoId };
@@ -116,4 +118,37 @@ test('late STT after Stop cannot install captions or clear a newer capture sessi
   reply({ ok: true, payload: { segments: [{ start: 50, end: 52, text: 'stale' }] } });
   assert.equal((await pending).length, 0);
   assert.equal(installed, 0); assert.equal(state.captureProcessing, true);
+});
+
+
+test('capture pause waits without failure, resumes, and Stop also releases a paused recorder', async () => {
+  for (const cancel of [false, true]) {
+    const fixture = recorderFixture();
+    const pending = fixture.record();
+    fixture.video.currentTime = 60;
+    fixture.video.pause(); fixture.listeners.get('pause')();
+    fixture.tick();
+    assert.ok(fixture.state.sourceCapture);
+    assert.equal(fixture.video.currentTime, 60);
+    assert.equal(fixture.stopped(), 0);
+    if (cancel) {
+      fixture.state.sourceCapture.cancel();
+      await assert.rejects(pending, /취소/);
+    } else {
+      await fixture.video.play(); fixture.listeners.get('play')();
+      fixture.video.currentTime = 75; fixture.tick();
+      assert.equal((await pending).end, 75);
+    }
+    assert.equal(fixture.video.currentTime, 50);
+    assert.equal(fixture.video.muted, false);
+    assert.equal(fixture.stopped(), 1);
+    assert.equal(fixture.listeners.size, 0);
+  }
+});
+
+test('queued pause event after playback resumes does not interrupt capture', async () => {
+  const fixture = recorderFixture(); const pending = fixture.record();
+  fixture.listeners.get('pause')();
+  fixture.video.currentTime = 75; fixture.tick();
+  assert.equal((await pending).end, 75);
 });

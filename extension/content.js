@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.8";
+  const BUILD_VERSION = "0.8.9";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -1993,8 +1993,9 @@
     stopCurrentAudio();
     state.resumeVideoAfterPrepare = true;
     try {
-      setStatus("원음 준비");
-      const recording = await recordOriginalAudio(video, duration, seconds => {
+      setStatus("원음 준비 · 0초");
+      const recording = await recordOriginalAudio(video, duration, (seconds, paused) => {
+        setStatus(paused ? "원음 준비 일시정지 · 영상 재생으로 계속" : `원음 준비 · ${seconds.toFixed(0)}/${duration.toFixed(0)}초`);
         updateMeta(videoId, "쿠키 없이 현재 영상의 원음 인식", `원음 준비 ${seconds.toFixed(0)} / ${duration.toFixed(0)}초 · 준비 후 현재 위치에서 더빙 재생`);
       });
       if (!isActiveSession(sessionId)) return [];
@@ -2031,6 +2032,7 @@
         clearInterval(timer); clearTimeout(watchdog);
         video.removeEventListener("seeking", onSeek);
         video.removeEventListener("pause", onPause);
+        video.removeEventListener("play", onPlay);
         video.removeEventListener("ended", onEnd);
         const end = video.currentTime;
         video.pause();
@@ -2044,11 +2046,27 @@
           else if (!size) reject(new Error("현재 영상의 원음을 읽을 수 없습니다."));
           else resolve({ blob: new Blob(chunks, { type: "audio/webm" }), start: saved.time, end });
         };
-        if (recorder?.state === "recording") { recorder.onstop = complete; recorder.stop(); }
+        if (recorder && recorder.state !== "inactive") { recorder.onstop = complete; recorder.stop(); }
         else complete();
       };
       const onSeek = () => finish(new Error("원음 준비 중 위치가 변경되었습니다. Start를 다시 눌러 주세요."), false);
-      const onPause = () => { if (!video.ended) finish(new Error("원음 준비가 일시정지되었습니다. Start를 다시 눌러 주세요.")); };
+      const armWatchdog = () => {
+        clearTimeout(watchdog);
+        const remaining = Math.max(0, duration - (video.currentTime - saved.time));
+        watchdog = setTimeout(() => finish(new Error("원음 준비 시간이 초과되었습니다.")), (remaining + 20) * 1000);
+      };
+      const onPause = () => {
+        if (video.ended || settled || !video.paused) return;
+        clearTimeout(watchdog);
+        if (recorder?.state === "recording") recorder.pause();
+        progress(video.currentTime - saved.time, true);
+      };
+      const onPlay = () => {
+        if (settled) return;
+        if (recorder?.state === "paused") recorder.resume();
+        armWatchdog();
+        progress(video.currentTime - saved.time, false);
+      };
       const onEnd = () => finish();
       state.sourceCapture = { cancel: () => finish(new Error("원음 준비 취소")) };
       try {
@@ -2066,15 +2084,16 @@
         recorder.start(250);
         video.addEventListener("seeking", onSeek);
         video.addEventListener("pause", onPause);
+        video.addEventListener("play", onPlay);
         video.addEventListener("ended", onEnd);
         timer = setInterval(() => {
           const elapsed = video.currentTime - saved.time;
-          progress(elapsed);
+          progress(elapsed, video.paused);
           if (video.closest('.ad-showing')) finish(new Error("광고가 시작되어 원음 준비를 중지했습니다."));
           else if (elapsed >= duration - 0.05 || video.ended) finish();
           else if (!video.isConnected || getVideoId() !== state.videoId) finish(new Error("영상이 변경되었습니다."), false);
         }, 100);
-        watchdog = setTimeout(() => finish(new Error("원음 준비 시간이 초과되었습니다.")), (duration + 20) * 1000);
+        armWatchdog();
         video.play().catch(error => finish(error));
       } catch (error) { finish(error); }
     });
