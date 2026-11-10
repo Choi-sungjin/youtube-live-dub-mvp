@@ -9,6 +9,7 @@ import { createLocalTranslator, LOCAL_TRANSLATION_REVISION, DEFAULT_LOCAL_MODEL 
 import { translationContext } from './caption-context.js';
 import { applyVerifiedCaptionTerms } from './verified-caption-terms.js';
 import { speechText, SPEECH_TEXT_REVISION, normalizeDubbingTranslation } from './speech-text.js';
+import { createApiSettingsHandler, loadPanelApiKey } from './api-settings.js';
 import { createCaptureHandler } from './capture-stt.js';
 import { createMediaRouter } from './media-router.js';
 import { createHash } from 'node:crypto';
@@ -26,6 +27,8 @@ const APP_VERSION = JSON.parse(await readFile(path.join(ROOT_DIR, 'package.json'
 await loadEnvFile(path.join(ROOT_DIR, '.env.local'));
 await loadEnvFile(path.join(__dirname, '.env.local'));
 await loadEnvFile(path.join(__dirname, '.env'));
+const PANEL_API_FILE = path.join(__dirname, '.env.panel.local');
+await loadPanelApiKey(PANEL_API_FILE);
 
 const PORT = Number(process.env.PORT || 18789);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -68,6 +71,15 @@ const SUPERTONE_VOICES = {
 await mkdir(AUDIO_DIR, { recursive: true });
 await mkdir(STT_DIR, { recursive: true });
 await mkdir(AUDIT_DIR, { recursive: true });
+const apiSettingsHandler = createApiSettingsHandler({ filename: PANEL_API_FILE, testConnection: async () => {
+  const started = Date.now();
+  const result = await prepareDub({ videoId: `api-test-${Date.now()}`, source: 'self-test', currentTime: 0,
+    settings: { mode: 'gpt', targetLang: 'ko', voice: 'marin' },
+    segments: [{ index: 0, start: 0, end: 4, text: 'The robot moves forward and turns left.' }] });
+  const segment = result.segments[0];
+  return { ok: true, elapsedMs: Date.now() - started, translatedText: segment.translatedText,
+    audioUrl: segment.audioUrl, duration: segment.duration };
+} });
 const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast });
 const mediaRoute = createMediaRouter({ root: ROOT_DIR, transcribe: transcribeFast, prepare: prepareDub });
 
@@ -110,6 +122,12 @@ const server = createServer(async (req, res) => {
         voices: Object.values(SUPERTONE_VOICES),
         port: PORT
       });
+      return;
+    }
+
+    if (url.pathname === '/api/settings/openai') {
+      res.setHeader('Cache-Control', 'no-store');
+      json(res, 200, await apiSettingsHandler(req));
       return;
     }
 
@@ -257,7 +275,7 @@ async function prepareDub(body, mediaTranscript) {
   }
 
   if ((settings.translationProvider === 'openai' || settings.ttsProvider === 'openai-realtime') && !process.env.OPENAI_API_KEY) {
-    throw httpError(503, 'OPENAI_API_KEY is not configured. Add it to backend/.env.local, then restart the server.');
+    throw httpError(503, 'OpenAI API 키가 없습니다. 패널 설정 → API 키 설정에서 등록해 주세요.');
   }
 
   const transcript = Array.isArray(mediaTranscript) ? {segments:mediaTranscript} : ['ollama', 'openai'].includes(activeTranslationProvider(settings)) ? await readCachedSttCaptions(videoId).catch(() => ({segments:[]})) : {segments:[]};

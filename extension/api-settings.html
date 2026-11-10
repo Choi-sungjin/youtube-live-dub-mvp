@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Dub · API 연결</title><link rel="stylesheet" href="api-settings.css">
+</head>
+<body>
+  <main>
+    <header><h1>API 연결</h1><button id="close" aria-label="닫기" type="button">×</button></header>
+    <p class="intro">GPT 번역과 음성에 사용할 OpenAI 키를 등록하세요.</p>
+    <p id="key-status" role="status">등록 상태 확인 중…</p>
+    <form id="key-form">
+      <label for="api-key">OpenAI API 키</label>
+      <input id="api-key" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" maxlength="503" required>
+      <p class="hint">키는 이 컴퓨터에만 저장됩니다. 저장 후 입력칸은 비워집니다.</p>
+      <div class="buttons"><button id="save" type="submit">키 저장</button><button id="delete" type="button">키 삭제</button></div>
+    </form>
+    <section>
+      <button id="test" type="button">번역·음성 연결 테스트</button>
+      <p class="hint">짧은 한 문장을 번역하고 음성으로 만듭니다. OpenAI API 사용량이 과금됩니다.</p>
+      <p id="result" role="status" aria-live="polite"></p>
+      <audio id="audio" controls hidden></audio>
+    </section>
+  </main>
+  <script src="api-settings.js"></script>
+</body>
+</html>

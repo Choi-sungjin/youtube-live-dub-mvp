@@ -6,6 +6,8 @@ const NATIVE_HOST_NAME = "com.youtube_live_dub.backend";
 const MESSAGE_HANDLERS = {
   YLD_SHORTCUTS_GET: async () => chrome.commands.getAll(),
   YLD_SHORTCUTS_OPEN: async () => { await chrome.tabs.create({url: "chrome://extensions/shortcuts"}); return {opened:true}; },
+  YLD_API_SETTINGS_OPEN: openApiSettings,
+  YLD_API_SETTINGS: apiSettingsRequest,
   YLD_PAGE_PROBE: executePageProbe,
   YLD_TRANSCRIBE_CAPTURE: transcribeCapture,
   YLD_BACKEND_HEALTH: ensureBackendHealth,
@@ -324,4 +326,35 @@ async function transcribeCapture(payload, sender) {
     body: JSON.stringify({ videoId: payload.videoId, start: payload.start, end: payload.end, audio: payload.audio }),
   });
   return readJsonResponse(response, "Original audio transcription");
+}
+
+function localSettingsBackend(value) {
+  const url = normalizeBackendUrl(value);
+  if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(url)) throw new Error("API 키 설정은 로컬 백엔드에서만 사용할 수 있습니다.");
+  return url;
+}
+async function openApiSettings(payload, sender) {
+  const url = new URL(sender?.url || "about:blank");
+  if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 ||
+      url.protocol !== "https:" || !["youtube.com", "www.youtube.com"].includes(url.hostname)) throw new Error("유튜브 패널에서 실행해 주세요.");
+  const backend = localSettingsBackend(payload?.backendUrl);
+  if (!chrome.action.openPopup) throw new Error("API 설정 팝업에는 Chrome 127 이상이 필요합니다.");
+  await chrome.action.setPopup({ tabId: sender.tab.id, popup: `api-settings.html?backend=${encodeURIComponent(backend)}` });
+  try { await chrome.action.openPopup({ windowId: sender.tab.windowId }); }
+  catch { await chrome.action.setPopup({ tabId: sender.tab.id, popup: "" }); throw new Error("API 설정 팝업을 열지 못했습니다. 패널에서 다시 눌러 주세요."); }
+  return { opened: true };
+}
+async function apiSettingsRequest(payload, sender) {
+  const url = new URL(sender?.url || "about:blank");
+  // Content scripts and web pages can open the popup, but cannot read/write keys.
+  if (sender?.id !== chrome.runtime.id || url.hostname !== chrome.runtime.id ||
+      url.protocol !== 'chrome-extension:' || url.pathname !== '/api-settings.html') throw new Error("API 설정 팝업에서 실행해 주세요.");
+  if (!['status', 'save', 'delete', 'test'].includes(payload?.action)) throw new Error("Invalid API settings action.");
+  const backendUrl = localSettingsBackend(payload.backendUrl);
+  const response = await fetch(`${backendUrl}/api/settings/openai`, {
+    method: 'POST', credentials: 'omit', signal: AbortSignal.timeout(180000),
+    headers: { 'content-type': 'application/json', 'x-yld-settings': '1' },
+    body: JSON.stringify({ action: payload.action, ...(payload.action === 'save' ? { key: payload.key } : {}) }),
+  });
+  return readJsonResponse(response, "API settings");
 }

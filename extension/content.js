@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.7";
+  const BUILD_VERSION = "0.8.8";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -170,6 +170,7 @@
           <p class="yld-mode-note">원문은 유튜브 자막 또는 이 PC의 음성 인식으로 준비해요. 위 선택은 번역과 음성 출력에 적용돼요.</p>
           <p class="yld-mode-note" data-yld-shortcuts aria-live="polite">단축키 확인 중…</p>
           <button class="yld-panel-button" type="button" data-yld-shortcuts-edit>단축키 변경</button>
+          <button class="yld-panel-button" type="button" data-yld-api-settings>API 키 설정 · 연결 테스트</button>
         <div class="yld-row">
           <label class="yld-label" for="yld-backend">
             Backend
@@ -326,6 +327,12 @@
     applyMode(selectedMode);
     els.speed.addEventListener("input", applyDubSpeed);
     els.speed.addEventListener("change", () => { els.speed.value = String(getDubSpeed()); applyDubSpeed(); });
+    els.panel.querySelector('[data-yld-api-settings]').addEventListener('click', async () => {
+      try {
+        const response = await sendRuntimeMessage({ type: 'YLD_API_SETTINGS_OPEN', payload: { backendUrl: els.backend.value } });
+        if (!response?.ok) throw new Error(response?.error || 'API 설정을 열지 못했습니다.');
+      } catch (error) { state.lastError = error.message; renderAlert(); }
+    });
     els.start.addEventListener("click", startDub);
     els.stop.addEventListener("click", stopDub);
     els.test.addEventListener("click", testBackend);

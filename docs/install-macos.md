@@ -64,7 +64,7 @@ YLD_INSTALL_SPEAKER=1 bash install-macos.command
 ```
 
 GPT 번역/음성은 선택 사항이며 API 키와 사용료가 필요합니다.
-`python3 scripts/set-openai-key.py`로 키를 설정한 뒤 서버를 재시작하세요.
+유튜브 패널의 **설정 → API 키 설정 · 연결 테스트**에서 키를 저장하세요. 서버 재시작 없이 적용됩니다. 이어서 **번역·음성 연결 테스트**를 누르면 짧은 문장의 실제 GPT 번역과 음성을 확인합니다. Chrome 127 이상이 필요합니다.
 로컬 모드에는 외부 AI API 키가 필요 없습니다.
 
 ## YouTube 원본 다운로드 제한
