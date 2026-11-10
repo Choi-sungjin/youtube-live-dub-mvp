@@ -36,3 +36,9 @@ v0.9.0의 빠른 원음 경로는 STT에만 오디오를 전달했다. 별도의
 - [Chrome: 메시지 발신 문서 정보](https://developer.chrome.com/docs/extensions/reference/api/runtime#type-MessageSender)
 - [Chrome: documentIds를 통한 특정 문서 실행](https://developer.chrome.com/docs/extensions/reference/api/scripting#type-InjectionTarget)
 - [audEERING 모델과 사용 예](https://github.com/audeering/w2v2-age-gender-how-to)
+
+## 확장 새로고침 후 실제 브라우저 확인
+
+2026-11-10 사용자가 확장을 새로고침한 뒤, 기존 Chrome 탭의 ‘연결 복구’를 눌러 패널 v0.9.1을 확인했다. 새 탭은 열지 않았다. YouTube 검색 화면에서 다른 영상으로 이동한 동일 문서에서 `cjUJ398GfJk`의 4번 모드를 실행했다. 버퍼 원음 인식·번역·GPT 음성이 실제로 진행됐으며, 남성 원문에 `cedar · 남성 음색`이 표시됐다. 36.91초에서 영상과 0.75/2.40초의 더빙이 함께 일시정지된 상태와 빈 오류 표시를 확인했다. 관측한 실행에서는 신고된 play/pause 오류와 Invalid capture sender가 재발하지 않았다.
+
+이번 실행의 첫 더빙은 17.02초, 준비 대기는 1회/5.44초, 재생 클립은 4개였다. 0대기 또는 기존 5~13초 수치를 모든 영상에 일반화할 수 없다. 이후 재생·Stop·검색 화면 전환도 관측했으나 사용자의 동시 탭 조작으로 반복 Start/Stop 및 재개 버튼 테스트를 통제하지 못했다. 따라서 해당 반복 시나리오 전체를 통과했다고 간주하지 않는다. 이번 브라우저 확인은 4번의 실제 남성 화자에 한정되며, 네 모드의 남녀 음색 분리는 위 합성 입력 기반 실제 모델/API 검증 결과다.
