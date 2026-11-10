@@ -168,6 +168,7 @@ async function downloadOriginalAudio(url, outputPath, options) {
   const ytDlpCommand = await requireCommand('yt-dlp', 'Install yt-dlp before running the STT fallback.');
   const ffmpegLocation = await resolveFfmpegLocation(options);
   const commandArgs = [
+    '--ignore-config',
     '--no-playlist',
     '--js-runtimes', `node:${process.execPath}`,
     '-f',

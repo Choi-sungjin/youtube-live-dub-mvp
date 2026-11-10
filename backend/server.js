@@ -9,6 +9,7 @@ import { createLocalTranslator, LOCAL_TRANSLATION_REVISION, DEFAULT_LOCAL_MODEL 
 import { translationContext } from './caption-context.js';
 import { applyVerifiedCaptionTerms } from './verified-caption-terms.js';
 import { speechText, SPEECH_TEXT_REVISION, normalizeDubbingTranslation } from './speech-text.js';
+import { createCaptureHandler } from './capture-stt.js';
 import { createMediaRouter } from './media-router.js';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -67,6 +68,7 @@ const SUPERTONE_VOICES = {
 await mkdir(AUDIO_DIR, { recursive: true });
 await mkdir(STT_DIR, { recursive: true });
 await mkdir(AUDIT_DIR, { recursive: true });
+const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast });
 const mediaRoute = createMediaRouter({ root: ROOT_DIR, transcribe: transcribeFast, prepare: prepareDub });
 
 const server = createServer(async (req, res) => {
@@ -133,6 +135,11 @@ const server = createServer(async (req, res) => {
         ? await readCachedSttCaptions(videoId)
         : await fetchCaptionsWithLocalFallback(videoId);
       json(res, 200, result);
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/captions/capture') {
+      json(res, 200, await captureHandler(req));
       return;
     }
 

@@ -7,6 +7,7 @@ const MESSAGE_HANDLERS = {
   YLD_SHORTCUTS_GET: async () => chrome.commands.getAll(),
   YLD_SHORTCUTS_OPEN: async () => { await chrome.tabs.create({url: "chrome://extensions/shortcuts"}); return {opened:true}; },
   YLD_PAGE_PROBE: executePageProbe,
+  YLD_TRANSCRIBE_CAPTURE: transcribeCapture,
   YLD_BACKEND_HEALTH: ensureBackendHealth,
   YLD_PREPARE_DUB: prepareDub,
   YLD_FETCH_CAPTIONS: fetchCaptions,
@@ -307,4 +308,20 @@ function normalizeBackendUrl(value) {
     return raw;
   }
   return DEFAULT_BACKEND_URL;
+}
+
+async function transcribeCapture(payload, sender) {
+  const url = new URL(sender?.url || "about:blank");
+  if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 ||
+      url.protocol !== "https:" || !["www.youtube.com", "youtube.com"].includes(url.hostname) || url.port ||
+      url.searchParams.get("v") !== payload?.videoId) throw new Error("Invalid capture sender.");
+  const backendUrl = normalizeBackendUrl(payload.backendUrl);
+  if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(backendUrl)) throw new Error("Capture requires a local backend.");
+  if (typeof payload.audio !== "string" || payload.audio.length > 1400000) throw new Error("Invalid capture size.");
+  const response = await fetch(`${backendUrl}/api/captions/capture`, {
+    method: "POST", credentials: "omit", signal: AbortSignal.timeout(180000),
+    headers: { "content-type": "application/json", "x-yld-capture": "1" },
+    body: JSON.stringify({ videoId: payload.videoId, start: payload.start, end: payload.end, audio: payload.audio }),
+  });
+  return readJsonResponse(response, "Original audio transcription");
 }

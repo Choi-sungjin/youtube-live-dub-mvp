@@ -80,7 +80,7 @@ export function createAudioSourceLoader({executeImpl=execute, exists=existsSync,
       await mkdirImpl(dir,{recursive:true});
       const executable = path.join(root, process.platform === 'win32' ? '.venv-win/Scripts/yt-dlp.exe' : '.venv/bin/yt-dlp');
       // Keep the original compressed container. No unbounded WAV expansion or ffmpeg child download.
-      await executeImpl(executable, ['--no-playlist','--no-progress','--max-filesize','100M','--js-runtimes',`node:${process.execPath}`,
+      await executeImpl(executable, ['--ignore-config','--no-playlist','--no-progress','--max-filesize','100M','--js-runtimes',`node:${process.execPath}`,
         '-f','ba/bestaudio','-o',output,`https://www.youtube.com/watch?v=${videoId}`],
         {timeout:60000,maxBuffer:1024*1024,windowsHide:true});
       if (!exists(output)) throw new Error('Source unavailable');
