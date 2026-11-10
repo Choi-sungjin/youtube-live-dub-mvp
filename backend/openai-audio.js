@@ -7,7 +7,7 @@ export const OPENAI_VOICES = ['marin', 'cedar', 'coral', 'alloy'];
 
 function requireKey(apiKey) {
   if (!apiKey) {
-    const error = new Error('OPENAI_API_KEY is not configured. Add it to backend/.env.local, then restart the server.');
+    const error = new Error('OPENAI_API_KEY가 없습니다. 패널 설정 → API 키 설정에서 등록해 주세요.');
     error.statusCode = 503;
     throw error;
   }
@@ -87,7 +87,7 @@ const safeCode = value => String(value || '').replace(/[^a-zA-Z0-9_-]/g, '').sli
 // Realtime reports most failures as an error event after the upgrade, and some as a non-101 reply.
 function providerFailure({ status = 0, code = '', type = '' }, model) {
   const detail = [status && `HTTP ${status}`, code || type].filter(Boolean).join(' ') || 'request_failed';
-  if (status === 401 || code === 'invalid_api_key') return voiceFailure(`OpenAI voice rejected the API key (${detail}). Check OPENAI_API_KEY in backend/.env.local, then restart the server.`, false);
+  if (status === 401 || code === 'invalid_api_key') return voiceFailure(`OpenAI voice rejected the API key (${detail}). 패널 설정 → API 키 설정에서 OPENAI_API_KEY를 다시 저장해 주세요.`, false);
   if (status === 403 || status === 404 || code === 'model_not_found') return voiceFailure(`OpenAI voice model ${safeCode(model)} is not available to this API key (${detail}). Check model access or OPENAI_VOICE_MODEL.`, false);
   if (code === 'insufficient_quota') return voiceFailure(`OpenAI voice quota is exhausted (${detail}). Check billing and credit.`, false);
   if (status === 429 || code === 'rate_limit_exceeded') return voiceFailure(`OpenAI voice is rate limited (${detail}). Lower LOCAL_TTS_CONCURRENCY if this repeats.`, true);
