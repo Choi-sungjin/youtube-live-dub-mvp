@@ -67,6 +67,7 @@ function recorderFixture() {
   }
   const state = { videoId: body.videoId };
   const ctx = vm.createContext({ state, MediaRecorder: Recorder, MediaStream: class {}, Blob,
+    isInterruptedPlay:error=>error?.name==='AbortError',
     setInterval(fn) { tick = fn; return 1; }, clearInterval() {}, setTimeout() { return 2; }, clearTimeout() {},
     getVideoId: () => body.videoId });
   const start = content.indexOf('  function recordOriginalAudio('), end = content.indexOf('  async function preprocessCaptionSegments(', start);
@@ -151,6 +152,38 @@ test('queued pause event after playback resumes does not interrupt capture', asy
   fixture.listeners.get('pause')();
   fixture.video.currentTime = 75; fixture.tick();
   assert.equal((await pending).end, 75);
+});
+
+test('a pending recorder play interrupted by Pause waits for resume instead of failing STT startup', async () => {
+  const fixture=recorderFixture(); let rejectPlay;
+  fixture.video.play=()=>new Promise((_,reject)=>{rejectPlay=reject;});
+  const pending=fixture.record();
+  rejectPlay(Object.assign(Error('The play() request was interrupted by a call to pause().'),{name:'AbortError'}));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(fixture.state.sourceCapture);
+  fixture.video.paused=false;fixture.listeners.get('play')();fixture.video.currentTime=75;fixture.tick();
+  assert.equal((await pending).end,75);
+});
+
+test('captured source is analyzed alongside STT before deletion and turns reach prepare evidence', async () => {
+  const cacheDir=await mkdtemp(path.join(tmpdir(),'yld-speaker-test-'));
+  try {
+    let analyzing=false;
+    const handler=createCaptureHandler({cacheDir,
+      analyzeSpeakers:async({inputPath,duration})=>{
+        analyzing=true;assert.equal(duration,4);assert.deepEqual(await readFile(inputPath),audio);
+        return {turns:[{start:0,end:2,label:'male'},{start:2,end:4,label:'female'}]};
+      },
+      transcribe:async()=>{
+        await new Promise(resolve=>setImmediate(resolve));assert.equal(analyzing,true);
+        return {segments:[{words:[{start:0,end:1.5,word:' First.'},{start:2,end:3.5,word:' Second.'}]}]};
+      }
+    });
+    const result=await handler(request({...body,end:54,autoSpeaker:true}));
+    assert.deepEqual(result.segments.map(s=>s.speaker.label),['male','female']);
+    assert.equal(result.segments[1].start,52);assert.ok(result.segments[1].speakerKey);
+    assert.deepEqual(await readdir(cacheDir),[]);
+  } finally {await rm(cacheDir,{recursive:true,force:true});}
 });
 
 test('buffered media is trimmed with local-only ffmpeg and low-latency STT before timestamps are offset', async () => {

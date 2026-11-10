@@ -1,4 +1,4 @@
-import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker } from './speaker-voices.js';
+import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker, analyzeCapturedSpeakers } from './speaker-voices.js';
 import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
 import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_VOICE_MODEL, OPENAI_VOICES } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
@@ -75,7 +75,7 @@ const apiSettingsHandler = createApiSettingsHandler({ filename: PANEL_API_FILE, 
   translate: translateOpenAI, synthesize: synthesizeOpenAISpeech,
   audioDir: AUDIO_DIR, audioBaseUrl: `http://${HOST}:${PORT}/audio`,
 }) });
-const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast });
+const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast, analyzeSpeakers: analyzeCapturedSpeakers });
 const mediaRoute = createMediaRouter({ root: ROOT_DIR, transcribe: transcribeFast, prepare: prepareDub });
 
 const server = createServer(async (req, res) => {
@@ -293,7 +293,8 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
     contextTopic: transcript.segments.filter(s=>s.end>=segment.start-45 && s.start<=segment.end+20).map(s=>s.text).join(' ').slice(-2200),
   }));
   const speakerResults = settings.autoSpeaker && ['openai-realtime', 'supertonic3'].includes(settings.ttsProvider) && !mediaTranscript && body?.source !== 'self-test'
-    ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end}))
+    ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end, speakerKey:segment.speakerKey,
+      allowDownload: !['youtube-buffered', 'youtube-captured'].includes(body?.source)}))
     : Promise.resolve(limitedSegments.map(() => null));
   const translationStarted = performance.now();
   const translated = await translateSegments(limitedSegments, settings, timings);
@@ -755,7 +756,8 @@ function normalizeSegment(segment, fallbackIndex) {
     index,
     start: Math.max(0, roundTime(start)),
     end: Math.max(0.25, roundTime(end)),
-    text
+    text,
+    ...(typeof segment.speakerKey === 'string' && /^[a-f0-9-]{36}$/.test(segment.speakerKey) ? {speakerKey:segment.speakerKey} : {})
   };
 }
 

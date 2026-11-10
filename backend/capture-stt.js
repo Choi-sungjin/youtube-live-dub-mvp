@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execute = promisify(execFile);
 import { timedClauses } from '../lib/timed-transcript.js';
+import { capturedSpeakerEvidence, splitSpeakerSegments } from './speaker-segments.js';
 
 const error = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 export function validateCapture(body) {
@@ -23,7 +24,7 @@ export function validateCapture(body) {
   return audio;
 }
 
-export function createCaptureHandler({ cacheDir, transcribe, executeImpl = execute }) {
+export function createCaptureHandler({ cacheDir, transcribe, analyzeSpeakers, executeImpl = execute }) {
   let active = 0;
   return async (req) => {
     // Only extension requests with a non-simple header. Ordinary web origins and
@@ -59,15 +60,24 @@ export function createCaptureHandler({ cacheDir, transcribe, executeImpl = execu
         if (wav.size < (body.end-body.start) * 16000 * 2 * 0.9) throw error(422, 'Buffered audio does not cover the requested window.');
         inputPath = output;
       }
-      const result = await transcribe({ inputPath, model: process.env.YLD_STT_MODEL || 'small', language: 'auto', lowLatency: body.buffered === true });
       const duration = body.end - body.start;
-      const segments = timedClauses(result.segments || []).map(segment => ({
+      const [sttResult, speakerResult] = await Promise.allSettled([
+        transcribe({ inputPath, model: process.env.YLD_STT_MODEL || 'small', language: 'auto', lowLatency: body.buffered === true }),
+        body.autoSpeaker === true && analyzeSpeakers ? analyzeSpeakers({inputPath, duration}).catch(() => ({turns:[]})) : null,
+      ]);
+      if (sttResult.status === 'rejected') throw sttResult.reason;
+      const result = sttResult.value;
+      const analysis = speakerResult.status === 'fulfilled' ? speakerResult.value : {turns:[]};
+      const clauses = analysis ? splitSpeakerSegments(result.segments || [], analysis.turns) : timedClauses(result.segments || []);
+      let segments = clauses.map(segment => ({
         start: body.start + Math.max(0, Math.min(duration, Number(segment.start))),
         end: body.start + Math.max(0, Math.min(duration, Number(segment.end))),
         text: String(segment.text || '').trim(),
+        ...(analysis ? {speaker:segment.speaker} : {}),
       })).filter(segment => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start && segment.text);
+      if (analysis) segments = capturedSpeakerEvidence.register(body.videoId, segments);
       return { ok: true, source: 'browser-original-audio', videoId: body.videoId, segments,
-        windows: [{ start: body.start, end: body.end }], inferenceMs: result.inferenceMs };
+        windows: [{ start: body.start, end: body.end }], inferenceMs: result.inferenceMs, speakerInferenceMs: analysis?.inferenceMs || 0 };
     } finally {
       if (directory) await rm(directory, { recursive: true, force: true });
       active--;

@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.9.0";
+  const BUILD_VERSION = "0.9.1";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -86,6 +86,7 @@
 
   const els = {};
   const prepareProgress = new Map();
+  const pendingAudioPlays = new WeakMap();
 
   init();
 
@@ -99,6 +100,9 @@
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
     window.addEventListener("message", handlePageMessage);
     installPageProbe();
+    document.addEventListener("yt-navigate-start", () => {
+      if (state.running) stopDub({ resumeVideo: false });
+    });
     document.addEventListener("yt-navigate-finish", handleNavigation);
     window.addEventListener("popstate", handleNavigation);
     setInterval(refreshPageState, 1500);
@@ -744,7 +748,7 @@
       // already playing final sentence finish at its original 1.15 generation speed.
       if (state.video.ended && state.currentAudio && !state.currentAudio.ended) return;
       if (state.currentAudio && !state.currentAudio.paused) {
-        state.currentAudio.pause();
+        pauseDubAudio(state.currentAudio);
       }
       return;
     }
@@ -859,7 +863,7 @@
       return;
     }
 
-    state.currentAudio.pause();
+    pauseDubAudio(state.currentAudio);
     seekAudio(state.currentAudio, 0);
     state.currentAudio = null;
     state.currentChunkIndex = -1;
@@ -932,7 +936,7 @@
         backendUrl: els.backend.value,
         videoId: state.videoId,
         currentTime: getVideoTime(),
-        source: state.bufferedAudioSource ? "youtube-buffered" : "youtube-timedtext",
+        source: state.bufferedAudioSource ? "youtube-buffered" : state.browserAudioSource ? "youtube-captured" : "youtube-timedtext",
         settings: dubbingSettingsFromControls(),
         segments: pending,
       }, state.bufferedAudioSource ? async item => {
@@ -1000,7 +1004,7 @@
     const playPromise = state.video.play();
     if (playPromise && typeof playPromise.catch === "function") {
       playPromise.catch((error) => {
-        console.warn("[YouTube Live Dub MVP] Could not resume YouTube playback.", error);
+        if (!isInterruptedPlay(error)) console.warn("[YouTube Live Dub MVP] Could not resume YouTube playback.", error);
       });
     }
   }
@@ -1043,26 +1047,41 @@
     try {
       await audio.play();
     } catch (error) {
+      if (sessionId !== state.sessionId || state.testAudio !== audio || isInterruptedPlay(error)) return;
       throw new Error(`Test audio play failed: ${error.message || String(error)}. Click the YouTube video once, then press Test again.`);
     }
   }
 
+  function pauseDubAudio(audio) {
+    pendingAudioPlays.delete(audio);
+    audio.pause();
+  }
+
+  function isInterruptedPlay(error) {
+    return error?.name === "AbortError" || /play\(\) request was interrupted/i.test(error?.message || "");
+  }
+
   function playAudio(audio) {
-    const promise = audio.play();
-    if (promise?.then) promise.then(() => {
-      if (state.running && state.currentAudio === audio && state.metrics) {
+    if (pendingAudioPlays.has(audio)) return;
+    const sessionId = state.sessionId;
+    const attempt = {};
+    pendingAudioPlays.set(audio, attempt);
+    const fail = error => {
+      if (!isActiveSession(sessionId) || state.currentAudio !== audio || pendingAudioPlays.get(audio) !== attempt || isInterruptedPlay(error)) return;
+      state.lastError = `음성을 재생하지 못했습니다: ${error.message || String(error)}. 영상 재생 버튼을 누른 뒤 다시 시작해 주세요.`;
+      setStatus("error");
+      updateMeta(state.videoId || "unknown", `${state.sourceSegments.length} segments`, state.lastError);
+    };
+    let promise;
+    try { promise = audio.play(); } catch (error) { fail(error); pendingAudioPlays.delete(audio); return; }
+    Promise.resolve(promise).then(() => {
+      if (isActiveSession(sessionId) && state.currentAudio === audio && pendingAudioPlays.get(audio) === attempt && !audio.paused && state.metrics) {
         if (state.metrics.firstAudioMs === null) state.metrics.firstAudioMs = Date.now() - state.metrics.startedAt;
         state.metrics.playedClips++;
       }
-    }, () => {});
-    if (promise && typeof promise.catch === "function") {
-      promise.catch((error) => {
-        state.lastError = `Audio play failed: ${error.message || String(error)}. Click the YouTube video once, then press Start again.`;
-        setStatus("error");
-        updateMeta(state.videoId || "unknown", `${state.sourceSegments.length} segments`, state.lastError);
-        console.warn("[YouTube Live Dub MVP] Audio play was blocked or failed.", error);
-      });
-    }
+    }, fail).finally(() => {
+      if (pendingAudioPlays.get(audio) === attempt) pendingAudioPlays.delete(audio);
+    });
   }
 
   function seekAudio(audio, seconds) {
@@ -1249,6 +1268,19 @@
 
   async function collectCaptionSegments(videoId) {
     const sessionId = state.sessionId;
+    // Automatic voices require actual source audio and word-aligned turns,
+    // even when a text-only caption cache exists.
+    if (els.voice?.value === "auto") {
+      try {
+        const buffered = await transcribeBufferedWindow(videoId, getVideoTime(), 12);
+        if (!isActiveSession(sessionId)) return [];
+        if (buffered !== null) { state.bufferedAudioSource = true; return buffered; }
+      } catch (error) {
+        if (!isActiveSession(sessionId)) return [];
+        state.bufferedSourceInfo = `원음 분석 재시도: ${error.message}`;
+      }
+      if (typeof state.video?.captureStream === "function") return captureCaptionWindow(videoId);
+    }
     const cached = await fetchBackendCaptionSegments(videoId, { cacheOnly: true });
     if (!isActiveSession(sessionId)) return [];
     if (segmentsCoverPlaybackStart(cached, getVideoTime())) return cached;
@@ -2004,6 +2036,7 @@
           start: Number(segment.start),
           end: Number(segment.end),
           text: cleanCaptionText(segment.text || ""),
+          ...(segment.speakerKey ? {speakerKey:segment.speakerKey} : {}),
         })).filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.text)
         : [];
     } catch (error) {
@@ -2044,7 +2077,7 @@
     state.bufferedSourceInfo = `미리 준비 ${formatTime(start)}–${formatTime(end)} · 내려받은 원음 ${formatTime(range.end)}까지`;
     if (state.startupPreparing) { setStatus("빠른 원음 인식"); updateMeta(videoId, state.bufferedSourceInfo, "영상을 되감지 않고 다음 구간도 미리 준비합니다"); }
     const response = await sendRuntimeMessage({type:"YLD_TRANSCRIBE_CAPTURE",payload:{
-      backendUrl:els.backend.value, videoId, start, end, audio:btoa(binary), buffered:true,
+      backendUrl:els.backend.value, videoId, start, end, audio:btoa(binary), buffered:true, autoSpeaker:els.voice?.value === "auto",
     }});
     if (!isActiveSession(sessionId)) return null;
     if (!response?.ok) throw new Error(response?.error || "버퍼 음성인식 실패");
@@ -2084,7 +2117,7 @@
       for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
       const response = await sendRuntimeMessage({ type: "YLD_TRANSCRIBE_CAPTURE", payload: {
         backendUrl: els.backend.value, videoId, start: recording.start, end: recording.end,
-        audio: btoa(binary),
+        audio: btoa(binary), autoSpeaker:els.voice?.value === "auto",
       }});
       if (!isActiveSession(sessionId)) return [];
       // A user seek while STT was running retires this window's results.
@@ -2172,7 +2205,10 @@
           else if (!video.isConnected || getVideoId() !== state.videoId) finish(new Error("영상이 변경되었습니다."), false);
         }, 100);
         armWatchdog();
-        video.play().catch(error => finish(error));
+        video.play().catch(error => {
+          if (settled || isInterruptedPlay(error)) { if (!settled && video.paused) onPause(); return; }
+          finish(error);
+        });
       } catch (error) { finish(error); }
     });
   }
@@ -2518,6 +2554,7 @@
         start: Number(segment.start),
         end: Number(segment.end),
         text: cleanCaptionText(segment.text || ""),
+        ...(segment.speakerKey ? {speakerKey:segment.speakerKey} : {}),
       }))
       .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start && segment.text)
       .sort((a, b) => a.start - b.start);
@@ -2541,6 +2578,7 @@
         start: Number(segment.start),
         end: Number(segment.end),
         text: cleanCaptionText(segment.text || ""),
+        ...(segment.speakerKey ? {speakerKey:segment.speakerKey} : {}),
       })).filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start && segment.text)
       : [];
   }
@@ -2864,7 +2902,7 @@
       const candidateText = `${current.text} ${segment.text}`.trim();
       const candidateDuration = segment.end - current.start;
 
-      if (candidateDuration > 3.8 || candidateText.length > 120) {
+      if (current.speakerKey || segment.speakerKey || candidateDuration > 3.8 || candidateText.length > 120) {
         chunks.push(current);
         current = newChunk(segment);
         return;
@@ -2885,6 +2923,7 @@
       start: roundTime(chunk.start),
       end: roundTime(chunk.end),
       text: chunk.text,
+      ...(chunk.speakerKey ? {speakerKey:chunk.speakerKey} : {}),
       segments: chunk.segments.map((segment) => ({
         start: roundTime(segment.start),
         end: roundTime(segment.end),
@@ -2898,6 +2937,7 @@
       start: segment.start,
       end: segment.end,
       text: segment.text,
+      speakerKey: segment.speakerKey,
       segments: [segment],
     };
   }
@@ -3174,6 +3214,7 @@
         start: Number(segment.start),
         end: Number(segment.end),
         text: cleanCaptionText(segment.text || ""),
+        ...(segment.speakerKey ? {speakerKey:segment.speakerKey} : {}),
       }))
       .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start && segment.text)
       .sort((a, b) => a.start - b.start);
@@ -3323,6 +3364,8 @@
     if (state.running) {
       stopDub({ resumeVideo: false });
     }
+    state.lastError = "";
+    setStatus("idle");
     state.pagePlayerResponse = null;
     state.pagePlayerResponseVideoId = "";
     state.pageTranscriptEndpoint = null;

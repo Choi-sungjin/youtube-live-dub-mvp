@@ -244,6 +244,29 @@ test('early-started audio cannot replay its first syllable when it ends before t
   f.video.currentTime=10.3;f.syncAudioToVideo();assert.equal(plays,2);
 });
 
+test('pending audio play is deduplicated; Pause abort and late Stop rejection cannot become panel errors',async()=>{
+  for(const action of ['pause','stop']) {
+    const f=await contentFixture();let rejectPlay,calls=0;
+    const audio={...fakeSpeech(4),play(){calls++;this.paused=false;return new Promise((_,reject)=>{rejectPlay=reject;});}};
+    f.state.running=true;f.state.chunks=[{index:0,start:0,end:4}];
+    f.state.prepared=[{chunkIndex:0,start:0,end:4,audio,ttsModel:'supertonic-3'}];
+    f.video.currentTime=0.1;f.syncAudioToVideo();audio.paused=true;f.syncAudioToVideo();assert.equal(calls,1);
+    if(action==='stop') f.stopDub(); else {f.video.paused=true;f.syncAudioToVideo();}
+    rejectPlay(Object.assign(Error('play interrupted'),{name:'AbortError'}));
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(f.state.lastError,'');
+  }
+});
+
+test('real media permission failure still appears instead of being swallowed as a pause',async()=>{
+  for(const synchronous of [false,true]) {
+  const f=await contentFixture();
+  const audio={...fakeSpeech(4),play(){const error=Object.assign(Error('Permission denied'),{name:'NotAllowedError'});if(synchronous)throw error;return Promise.reject(error);}};
+  f.state.running=true;f.state.chunks=[{index:0,start:0,end:4}];f.state.prepared=[{chunkIndex:0,start:0,end:4,audio}];
+  f.video.currentTime=0.1;f.syncAudioToVideo();await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.state.lastError,/Permission denied/);assert.equal(f.state.status,'error');
+  }
+});
+
 test('the final spoken sentence can finish after video end, while Stop still cuts it immediately', async () => {
   const f=await contentFixture();const audio=fakeSpeech(4);audio.paused=false;audio.currentTime=2;
   f.state.running=true;f.state.currentAudio=audio;f.state.currentChunkIndex=0;
