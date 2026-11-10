@@ -240,7 +240,7 @@ function runPageProbe({ requestId = "", mode = "snapshot", targetLang = "ko" } =
     for (const attempt of attempts) {
       const response = await fetch(`https://www.youtube.com/youtubei/v1/get_transcript?key=${encodeURIComponent(config.INNERTUBE_API_KEY)}`, {
         method: "POST",
-        credentials: "include",
+        credentials: "omit",
         headers,
         body: JSON.stringify({
           context: config.INNERTUBE_CONTEXT,
@@ -751,42 +751,7 @@ function runPageProbe({ requestId = "", mode = "snapshot", targetLang = "ko" } =
       headers["x-goog-authuser"] = String(config.SESSION_INDEX);
     }
 
-    const authorization = await createSapisidAuthHeader();
-    if (authorization) {
-      headers.authorization = authorization;
-    }
-
     return headers;
-  }
-
-  async function createSapisidAuthHeader() {
-    const sapisid =
-      readCookie("__Secure-3PAPISID") ||
-      readCookie("__Secure-1PAPISID") ||
-      readCookie("SAPISID") ||
-      readCookie("APISID");
-
-    if (!sapisid || !crypto?.subtle) {
-      return "";
-    }
-
-    const timestamp = Math.floor(Date.now() / 1000);
-    const input = `${timestamp} ${sapisid} ${location.origin}`;
-    const bytes = new TextEncoder().encode(input);
-    const digest = await crypto.subtle.digest("SHA-1", bytes);
-    const hash = Array.from(new Uint8Array(digest))
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
-    return `SAPISIDHASH ${timestamp}_${hash}`;
-  }
-
-  function readCookie(name) {
-    const prefix = `${name}=`;
-    return document.cookie
-      .split(";")
-      .map((item) => item.trim())
-      .find((item) => item.startsWith(prefix))
-      ?.slice(prefix.length) || "";
   }
 
   function installNetworkProbe() {

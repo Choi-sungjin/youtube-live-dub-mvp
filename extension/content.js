@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.6";
+  const BUILD_VERSION = "0.8.7";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -41,6 +41,9 @@
     running: false,
     sessionId: 0,
     captionAbortController: null,
+    sourceCapture: null,
+    captureProcessing: false,
+    browserAudioSource: false,
     status: "idle",
     lastError: "",
     videoId: "",
@@ -435,6 +438,7 @@
 
     const sessionId = ++state.sessionId;
     state.running = true;
+    state.browserAudioSource = false;
     state.playbackHold = null;
     state.lastSyncVideoTime = null;
     state.transcriptWindows = [];
@@ -459,6 +463,13 @@
       state.sourceSegments = segments;
 
       if (!segments.length) {
+        if (state.browserAudioSource && state.transcriptWindows.length) {
+          state.chunks = []; state.prepared = []; state.preparedChunkIndexes = new Set();
+          state.startupPreparing = false;
+          setStatus("ready");
+          updateMeta(state.videoId, "현재 구간에 말소리 없음", "다음 구간에서 원음 인식을 이어갑니다");
+          beginSyncLoop(); resumeVideoIfNeeded(); return;
+        }
         throw new Error("No timed text captions were found for this video.");
       }
 
@@ -583,6 +594,8 @@
     state.recoveryResume = null;
     const shouldResume = options.resumeVideo !== false && state.resumeVideoAfterPrepare &&
       (!state.startupPreparing || state.wasPlayingBeforeStart);
+    state.sourceCapture?.cancel();
+    state.captureProcessing = false;
     state.sessionId += 1;
     state.captionAbortController?.abort();
     state.captionAbortController = null;
@@ -674,6 +687,7 @@
   }
 
   function syncAudioToVideo() {
+    if (state.captureProcessing) return;
     if (!state.running || !state.video) {
       return;
     }
@@ -832,11 +846,10 @@
   }
 
   function maybePrepareMoreAudio(videoTime, reason = "auto") {
-    if (!state.running || !state.chunks.length) {
-      return;
-    }
-
+    if (state.captureProcessing) return;
+    if (!state.running) return;
     maybeExpandTranscriptCoverage(videoTime);
+    if (state.captureProcessing || !state.chunks.length) return;
 
     if (state.preparingChunks) {
       return;
@@ -946,6 +959,7 @@
   }
 
   function resumeVideoIfNeeded() {
+    if (state.captureProcessing) return;
     if (!state.video || !state.resumeVideoAfterPrepare) {
       return;
     }
@@ -1248,9 +1262,12 @@
       }
     }
 
-    const localSegments = await preprocessCaptionSegments(videoId, cached);
+    // Prefer the original media element: no download, login cookies or tab audio.
+    const localSegments = typeof state.video?.captureStream === "function"
+      ? await captureCaptionWindow(videoId)
+      : await preprocessCaptionSegments(videoId, cached);
     if (!isActiveSession(sessionId)) return [];
-    if (localSegments.length) return localSegments;
+    if (localSegments.length || state.browserAudioSource) return localSegments;
     throw new Error(`${fallbackReason}; local speech recognition did not return captions.`);
   }
 
@@ -1697,7 +1714,7 @@
       const response = await fetch(`https://www.youtube.com/youtubei/v1/get_transcript?key=${encodeURIComponent(config.INNERTUBE_API_KEY)}`, {
         method: "POST",
         signal: AbortSignal.timeout(6000),
-        credentials: "include",
+        credentials: "omit",
         headers,
         body: JSON.stringify({
           context,
@@ -1952,6 +1969,110 @@
     }
   }
 
+  async function captureCaptionWindow(videoId) {
+    const sessionId = state.sessionId;
+    const video = state.video;
+    if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(els.backend.value)) {
+      throw new Error("쿠키 없는 음성인식은 로컬 백엔드에서만 사용할 수 있습니다.");
+    }
+    if (!Number.isFinite(video.duration) || video.duration <= 0 || video.closest('.ad-showing')) {
+      throw new Error("광고가 끝난 일반 유튜브 영상에서 다시 시작해 주세요.");
+    }
+    const start = video.currentTime;
+    const duration = Math.min(25, video.duration - start);
+    if (duration < 0.5) return [];
+    state.browserAudioSource = true;
+    state.captureProcessing = true;
+    stopCurrentAudio();
+    state.resumeVideoAfterPrepare = true;
+    try {
+      setStatus("원음 준비");
+      const recording = await recordOriginalAudio(video, duration, seconds => {
+        updateMeta(videoId, "쿠키 없이 현재 영상의 원음 인식", `원음 준비 ${seconds.toFixed(0)} / ${duration.toFixed(0)}초 · 준비 후 현재 위치에서 더빙 재생`);
+      });
+      if (!isActiveSession(sessionId)) return [];
+      setStatus("stt");
+      updateMeta(videoId, "원음 준비 완료 · 로컬 음성인식 중", "자막을 만든 뒤 같은 위치에서 더빙합니다");
+      const bytes = new Uint8Array(await recording.blob.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      const response = await sendRuntimeMessage({ type: "YLD_TRANSCRIBE_CAPTURE", payload: {
+        backendUrl: els.backend.value, videoId, start: recording.start, end: recording.end,
+        audio: btoa(binary),
+      }});
+      if (!isActiveSession(sessionId)) return [];
+      // A user seek while STT was running retires this window's results.
+      if (Math.abs(video.currentTime - start) > 0.5) throw new Error("준비 중 위치가 변경되었습니다. Start를 다시 눌러 주세요.");
+      if (!response?.ok) throw new Error(response?.error || "원음 음성인식 실패");
+      updateTranscriptWindows(response.payload);
+      return normalizePreprocessSegments(response.payload?.segments);
+    } finally {
+      if (state.sessionId === sessionId) {
+        state.captureProcessing = false;
+        state.lastSyncVideoTime = null;
+      }
+    }
+  }
+
+  function recordOriginalAudio(video, duration, progress) {
+    return new Promise((resolve, reject) => {
+      const saved = { time: video.currentTime, rate: video.playbackRate, muted: video.muted };
+      let stream, recorder, timer, watchdog, settled = false, chunks = [], size = 0;
+      const finish = (error, rewind = true) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(timer); clearTimeout(watchdog);
+        video.removeEventListener("seeking", onSeek);
+        video.removeEventListener("pause", onPause);
+        video.removeEventListener("ended", onEnd);
+        const end = video.currentTime;
+        video.pause();
+        if (rewind && video.isConnected) video.currentTime = saved.time;
+        video.playbackRate = saved.rate;
+        video.muted = saved.muted;
+        state.sourceCapture = null;
+        const complete = () => {
+          stream?.getTracks().forEach(track => track.stop());
+          if (error) reject(error);
+          else if (!size) reject(new Error("현재 영상의 원음을 읽을 수 없습니다."));
+          else resolve({ blob: new Blob(chunks, { type: "audio/webm" }), start: saved.time, end });
+        };
+        if (recorder?.state === "recording") { recorder.onstop = complete; recorder.stop(); }
+        else complete();
+      };
+      const onSeek = () => finish(new Error("원음 준비 중 위치가 변경되었습니다. Start를 다시 눌러 주세요."), false);
+      const onPause = () => { if (!video.ended) finish(new Error("원음 준비가 일시정지되었습니다. Start를 다시 눌러 주세요.")); };
+      const onEnd = () => finish();
+      state.sourceCapture = { cancel: () => finish(new Error("원음 준비 취소")) };
+      try {
+        video.playbackRate = 1;
+        video.muted = true;
+        stream = video.captureStream();
+        const audioTracks = stream.getAudioTracks();
+        if (!audioTracks.length) throw new Error("이 영상에서는 원음 캡처를 지원하지 않습니다.");
+        recorder = new MediaRecorder(new MediaStream(audioTracks), { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: 64000 });
+        recorder.ondataavailable = event => {
+          if (event.data.size) { chunks.push(event.data); size += event.data.size; }
+          if (size > 1024 * 1024) finish(new Error("원음 버퍼 한도를 초과했습니다."));
+        };
+        recorder.onerror = () => finish(new Error("원음 녹음에 실패했습니다."));
+        recorder.start(250);
+        video.addEventListener("seeking", onSeek);
+        video.addEventListener("pause", onPause);
+        video.addEventListener("ended", onEnd);
+        timer = setInterval(() => {
+          const elapsed = video.currentTime - saved.time;
+          progress(elapsed);
+          if (video.closest('.ad-showing')) finish(new Error("광고가 시작되어 원음 준비를 중지했습니다."));
+          else if (elapsed >= duration - 0.05 || video.ended) finish();
+          else if (!video.isConnected || getVideoId() !== state.videoId) finish(new Error("영상이 변경되었습니다."), false);
+        }, 100);
+        watchdog = setTimeout(() => finish(new Error("원음 준비 시간이 초과되었습니다.")), (duration + 20) * 1000);
+        video.play().catch(error => finish(error));
+      } catch (error) { finish(error); }
+    });
+  }
+
   async function preprocessCaptionSegments(videoId, seedSegments = []) {
     const sessionId = state.sessionId;
     try {
@@ -2069,7 +2190,7 @@
   }
 
   function maybeExpandTranscriptCoverage(videoTime) {
-    if (!state.running || state.transcriptExpanding || !state.sourceSegments.length) {
+    if (!state.running || state.transcriptExpanding || (!state.sourceSegments.length && !state.browserAudioSource)) {
       return;
     }
 
@@ -2089,6 +2210,28 @@
       (remainingTranscript > STT_EXTENSION_THRESHOLD_SECONDS && chunksRemaining > 10)
       )
     ) {
+      return;
+    }
+
+    if (state.browserAudioSource) {
+      if (state.video.paused && !state.playbackHold) return;
+      if (!missingCurrentWindow && remainingTranscript > 0.5) return;
+      const sessionId = state.sessionId;
+      state.transcriptExpanding = true;
+      captureCaptionWindow(state.videoId).then(segments => {
+        if (!isActiveSession(sessionId)) return;
+        maybeInstallExpandedSegments(segments);
+      }).catch(error => {
+        if (!isActiveSession(sessionId)) return;
+        state.lastError = error.message;
+        setStatus("error");
+        stopDub({ keepStatus: true, resumeVideo: false });
+      }).finally(() => {
+        if (isActiveSession(sessionId)) {
+          state.transcriptExpanding = false;
+          maybePrepareMoreAudio(getVideoTime(), "capture-complete");
+        }
+      });
       return;
     }
 
@@ -2333,7 +2476,7 @@
       try {
         const response = await fetch(item.url, {
           signal,
-          credentials: "include",
+          credentials: "omit",
           headers: buildYouTubeClientHeaders(),
         });
         const text = await response.text();
@@ -3128,6 +3271,7 @@
   }
 
   function applyOriginalVolume(options = {}) {
+    if (state.sourceCapture) return;
     if (!state.video || (!state.running && !options.force)) {
       return;
     }

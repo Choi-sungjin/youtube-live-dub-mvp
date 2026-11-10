@@ -104,3 +104,25 @@ test('content bridge reports failures without throwing or creating extension scr
   }
   assert.doesNotMatch(text, /getURL\(["']page-probe\.js/);
 });
+
+test('transcript requests omit cookies and never read browser authentication cookies', async () => {
+  const { context, messages } = pageFixture();
+  let requests = 0;
+  Object.defineProperty(context.document, 'cookie', { get() { throw new Error('Cookie access forbidden'); } });
+  context.location.origin = 'https://www.youtube.com';
+  context.window.ytInitialData = { getTranscriptEndpoint: { params: 'fixture-params' } };
+  context.window.ytcfg = { get(key) {
+    return { INNERTUBE_API_KEY: 'public-fixture', INNERTUBE_CONTEXT: { client: { clientVersion: 'fixture' } } }[key];
+  }};
+  context.fetch = async (_url, options) => {
+    requests++;
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.headers.authorization, undefined);
+    return { ok: true, status: 200, text: async () => '{}' };
+  };
+  vm.runInContext(source('page-probe.js'), context);
+  context.runPageProbe({ requestId: 'cookie-free', mode: 'fetch-transcript', targetLang: 'ko' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests, 1);
+  assert.ok(messages.some(m => m.type === 'TRANSCRIPT_RESPONSE' && m.requestId === 'cookie-free'));
+});
