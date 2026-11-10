@@ -152,3 +152,32 @@ test('queued pause event after playback resumes does not interrupt capture', asy
   fixture.video.currentTime = 75; fixture.tick();
   assert.equal((await pending).end, 75);
 });
+
+test('buffered media is trimmed with local-only ffmpeg and low-latency STT before timestamps are offset', async () => {
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'yld-buffer-test-'));
+  try {
+    let called = false;
+    const handler = createCaptureHandler({cacheDir,
+      executeImpl: async (command,args,options) => {
+        assert.equal(command,'ffmpeg'); assert.ok(args.includes('file,pipe'));
+        assert.ok(args.includes('-copyts'));
+        assert.ok(args.includes('atrim=start=50:end=62,asetpts=PTS-STARTPTS'));
+        assert.equal(options.timeout,15000);
+        await (await import('node:fs/promises')).writeFile(args.at(-1),Buffer.alloc(12*16000*2));
+      },
+      transcribe: async input => {
+        called = true; assert.equal(input.lowLatency,true); assert.match(input.inputPath,/window.wav$/);
+        return {segments:[{start:1,end:3,text:'Real window.'}],inferenceMs:10};
+      }
+    });
+    const result = await handler(request({...body,end:62,buffered:true}));
+    assert.equal(called,true); assert.equal(result.segments[0].start,51);
+    assert.deepEqual(result.windows,[{start:50,end:62}]);
+    assert.deepEqual(await readdir(cacheDir),[]);
+    const short = createCaptureHandler({cacheDir, executeImpl:async (_cmd,args)=>{
+      await (await import('node:fs/promises')).writeFile(args.at(-1),Buffer.alloc(100));
+    },transcribe:async()=>{throw new Error('must not transcribe truncated audio');}});
+    await assert.rejects(short(request({...body,end:62,buffered:true})),/does not cover/);
+    assert.deepEqual(await readdir(cacheDir),[]);
+  } finally {await rm(cacheDir,{recursive:true,force:true});}
+});

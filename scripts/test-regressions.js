@@ -620,3 +620,34 @@ test('slowing a nearly finished clip never replays its tail when media clock tra
  f.video.currentTime=24.16;position=10;audio.ended=true;audio.paused=true;f.syncAudioToVideo();
  assert.equal(plays,1);assert.deepEqual(seeks,[4]);assert.equal(f.state.currentAudio,audio);
 });
+
+test('buffered source batches future voices while still prioritizing missing current audio', async () => {
+  const requests=[];
+  const f=await contentFixture({prepare:async payload=>{
+    requests.push(payload.segments.map(chunk=>chunk.index));
+    return {segments:payload.segments.map(chunk=>({...chunk,audioUrl:'fixture.wav'}))};
+  }});
+  f.state.running=true;f.state.bufferedAudioSource=true;f.state.bufferedRetryAt=Infinity;
+  f.video.currentTime=42;
+  f.state.chunks=Array.from({length:10},(_,index)=>({index,start:index*10,end:index*10+10,text:'caption'}));
+  f.maybePrepareMoreAudio(42,'seek');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.deepEqual(Array.from(requests[0]),[4,5]);
+  f.stopDub();
+});
+
+test('completed streamed audio is playable before its batch finishes and final response cannot duplicate it', async () => {
+  const done=deferred();let progress;
+  const audio={pause(){},currentTime:0};
+  const first={index:0,start:0,end:4,text:'first',audioUrl:'first.wav'};
+  const second={index:1,start:4,end:8,text:'second',audioUrl:'second.wav'};
+  const f=await contentFixture({audio,prepare:async (_payload,onSegment)=>{progress=onSegment;return done.promise;}});
+  f.state.running=true;f.state.bufferedAudioSource=true;f.state.chunks=[first,second];
+  const pending=f.prepareAndAppendChunks([first,second]);
+  await progress(first);
+  assert.equal(f.state.preparingChunks,true);assert.deepEqual(Array.from(f.state.preparedChunkIndexes),[0]);
+  assert.equal(f.state.prepared[0].audio,audio);
+  done.resolve({segments:[first,second]});await pending;
+  assert.deepEqual(Array.from(f.state.preparedChunkIndexes),[0,1]);assert.equal(f.state.prepared.length,2);
+  f.stopDub();await progress(second);assert.equal(f.state.prepared.length,0);
+});

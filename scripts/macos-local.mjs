@@ -11,7 +11,7 @@ const version = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')
 const defaults = {
   TRANSLATION_PROVIDER: 'ollama', OLLAMA_BASE_URL: 'http://127.0.0.1:11434',
   OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma4:e4b-it-q4_K_M',
-  TTS_PROVIDER: 'supertonic3', YLD_STT_MODEL: 'small',
+  TTS_PROVIDER: 'supertonic3', YLD_STT_MODEL: 'base',
   YLD_STT_DEVICE: 'cpu', YLD_STT_COMPUTE: 'int8', HOST: '127.0.0.1', PORT: '18789'
 };
 

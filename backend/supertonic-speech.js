@@ -14,7 +14,7 @@ function startWorker() {
   const python = process.env.SUPERTONIC_PYTHON || (existsSync(localPython) ? localPython : 'python');
   const child = spawn(python, ['-u', fileURLToPath(new URL('./supertonic-worker.py', import.meta.url))], {
     windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', OMP_NUM_THREADS: '4' },
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', OMP_NUM_THREADS: process.env.SUPERTONIC_THREADS || (process.platform === 'darwin' ? '2' : '4') },
   });
   let resolveReady, rejectReady;
   const record = { child, pending: new Map(), ready: false, loadMs: null, errorText: '',
@@ -67,7 +67,7 @@ export async function synthesizeSupertonicSpeech({ text, settings, outputPath })
     }, 60000);
     record.pending.set(id, { resolve, reject, timer });
     record.child.stdin.write(`${JSON.stringify({ id, text, voice, language: settings.targetLang,
-      speed: 1.15, outputPath })}\n`);
+      speed: 1.15, steps: settings.speechSteps === 5 ? 5 : 8, outputPath })}\n`);
   });
   const duration = wavDuration(await readFile(outputPath));
   return { duration, ttsModel: 'supertonic-3', voiceId: voice, speechSpeed: 1.15, synthesisMs: result.synthesisMs };

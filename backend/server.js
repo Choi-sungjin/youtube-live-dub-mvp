@@ -128,6 +128,18 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/dub/prepare') {
       const body = await readJson(req);
+      if (body.stream === true) {
+        res.writeHead(200, {'Content-Type':'application/x-ndjson', 'Cache-Control':'no-store'});
+        try {
+          const result = await prepareDub(body, undefined, item => {
+            if (!res.destroyed) res.write(JSON.stringify({type:'segment',item})+'\n');
+          });
+          if (!res.destroyed) res.end(JSON.stringify({type:'done',result})+'\n');
+        } catch (error) {
+          if (!res.destroyed) res.end(JSON.stringify({type:'error',error:error.message})+'\n');
+        }
+        return;
+      }
       const result = await prepareDub(body);
       if (process.env.YLD_AUDIT === '1') await appendFile(path.join(AUDIT_DIR, `${hashValue(result.videoId)}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n');
       json(res, 200, result);
@@ -254,11 +266,12 @@ function providerInfo() {
   };
 }
 
-async function prepareDub(body, mediaTranscript) {
+async function prepareDub(body, mediaTranscript, onPrepared) {
   const requestStarted = performance.now();
   const timings = {};
   const videoId = String(body?.videoId || '').trim();
   const settings = normalizeSettings(body?.settings);
+  settings.speechSteps = body?.source === "youtube-buffered" ? 5 : 8;
   const inputSegments = Array.isArray(body?.segments) ? body.segments : [];
   const segments = applyVerifiedCaptionTerms(videoId, inputSegments.map((segment, index) => normalizeSegment(segment, index)).filter(Boolean));
 
@@ -336,7 +349,7 @@ async function prepareDub(body, mediaTranscript) {
       audioTranscript = result.transcript ?? null;
     }
 
-    return {
+    const completed = {
       hit: exists,
       item: {
         id,
@@ -360,6 +373,8 @@ async function prepareDub(body, mediaTranscript) {
         ttsModel: actualTtsModel
       }
     };
+    onPrepared?.(completed.item);
+    return completed;
   });
 
   const hits = preparedItems.filter((result) => result.hit).length;
@@ -1192,6 +1207,7 @@ function cacheableSettings(settings) {
     targetLang: settings.targetLang,
     ttsModel: settings.ttsModel,
     ttsProvider: settings.ttsProvider,
+    speechSteps: settings.ttsProvider === "supertonic3" ? settings.speechSteps : undefined,
     translationProvider: settings.translationProvider
   };
 }

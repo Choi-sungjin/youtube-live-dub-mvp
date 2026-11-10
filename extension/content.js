@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.8.9";
+  const BUILD_VERSION = "0.9.0";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -44,6 +44,11 @@
     sourceCapture: null,
     captureProcessing: false,
     browserAudioSource: false,
+    bufferedAudioSource: false,
+    bufferedRetryAt: 0,
+    bufferedFailures: 0,
+    bufferedSourceInfo: "대기",
+    bufferedInferenceMs: 0,
     status: "idle",
     lastError: "",
     videoId: "",
@@ -80,6 +85,7 @@
   };
 
   const els = {};
+  const prepareProgress = new Map();
 
   init();
 
@@ -358,6 +364,10 @@
   }
 
   function handleRuntimeMessage(message, _sender, sendResponse) {
+    if (message?.type === 'YLD_PREPARE_PROGRESS') {
+      if (_sender?.id === chrome.runtime.id) prepareProgress.get(message.requestId)?.(message.item);
+      sendResponse({ok:true}); return false;
+    }
     if (!message || ![
       "YLD_DUB_START",
       "YLD_DUB_STOP",
@@ -446,6 +456,9 @@
     const sessionId = ++state.sessionId;
     state.running = true;
     state.browserAudioSource = false;
+    state.bufferedAudioSource = false;
+    state.bufferedRetryAt = 0;
+    state.bufferedFailures = 0;
     state.playbackHold = null;
     state.lastSyncVideoTime = null;
     state.transcriptWindows = [];
@@ -470,7 +483,7 @@
       state.sourceSegments = segments;
 
       if (!segments.length) {
-        if (state.browserAudioSource && state.transcriptWindows.length) {
+        if ((state.browserAudioSource || state.bufferedAudioSource) && state.transcriptWindows.length) {
           state.chunks = []; state.prepared = []; state.preparedChunkIndexes = new Set();
           state.startupPreparing = false;
           setStatus("ready");
@@ -490,7 +503,7 @@
         "paused while preparing first dub buffer"
       );
 
-      const initialChunks = selectChunksForWindow(state.chunks, getVideoTime()).slice(0, MIN_START_BUFFER_CLIPS);
+      const initialChunks = selectChunksForWindow(state.chunks, getVideoTime()).slice(0, state.bufferedAudioSource ? 3 : MIN_START_BUFFER_CLIPS);
       maybeExpandTranscriptCoverage(getVideoTime());
       const preparedCount = await prepareAndAppendChunks(initialChunks);
       if (!isActiveSession(sessionId)) return;
@@ -899,7 +912,7 @@
     const sessionId = state.sessionId;
     const pending = chunks
       .filter((chunk) => !state.preparedChunkIndexes.has(chunk.index))
-      .slice(0, MAX_PREPARE_CHUNKS);
+      .slice(0, state.bufferedAudioSource ? (state.startupPreparing ? 3 : 2) : MAX_PREPARE_CHUNKS);
 
     if (!pending.length) {
       return 0;
@@ -919,16 +932,28 @@
         backendUrl: els.backend.value,
         videoId: state.videoId,
         currentTime: getVideoTime(),
-        source: "youtube-timedtext",
+        source: state.bufferedAudioSource ? "youtube-buffered" : "youtube-timedtext",
         settings: dubbingSettingsFromControls(),
         segments: pending,
-      });
+      }, state.bufferedAudioSource ? async item => {
+        if (!isActiveSession(sessionId) || !pending.some(chunk => chunk.index === item.index) || state.preparedChunkIndexes.has(item.index)) return;
+        const partial = normalizePreparedAudio({segments:[item]},pending);
+        await bufferPreparedAudio(partial);
+        if (!isActiveSession(sessionId)) { partial.forEach(entry=>entry.audio?.pause()); return; }
+        for (const entry of partial) {
+          if (!state.chunks.some(chunk=>chunk.index===entry.chunkIndex) || state.preparedChunkIndexes.has(entry.chunkIndex)) continue;
+          state.preparedChunkIndexes.add(entry.chunkIndex); state.prepared.push(entry);
+        }
+        state.prepared.sort((a,b)=>a.start-b.start);
+      } : undefined);
       if (!isActiveSession(sessionId)) return 0;
       if (state.metrics) state.metrics.lastPrepareMs = Date.now() - prepareStarted;
-      const prepared = normalizePreparedAudio(response, pending);
+      const prepared = normalizePreparedAudio(response, pending).filter(item => !state.preparedChunkIndexes.has(item.chunkIndex));
 
       if (!prepared.length) {
-        return 0;
+        const installed = pending.filter(chunk => state.preparedChunkIndexes.has(chunk.index)).length;
+        if (installed) setStatus("ready");
+        return installed;
       }
 
       await bufferPreparedAudio(prepared);
@@ -1189,17 +1214,19 @@
     state.objectUrls = [];
   }
 
-  async function requestDubPrepare(payload) {
-    const response = await sendRuntimeMessage({
-      type: "YLD_PREPARE_DUB",
-      payload,
+  async function requestDubPrepare(payload, onSegment) {
+    const requestId = `dub-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let progress = Promise.resolve(), progressError;
+    if (onSegment) prepareProgress.set(requestId, item => {
+      progress = progress.then(() => onSegment(item)).catch(error => { progressError = error; });
     });
-
-    if (!response || !response.ok) {
-      throw new Error(response && response.error ? response.error : "Backend request failed.");
-    }
-
-    return response.payload || {};
+    try {
+      const response = await sendRuntimeMessage({type:"YLD_PREPARE_DUB",payload:{...payload,stream:Boolean(onSegment),requestId}});
+      await progress;
+      if (progressError) throw progressError;
+      if (!response?.ok) throw new Error(response?.error || "Backend request failed.");
+      return response.payload || {};
+    } finally { prepareProgress.delete(requestId); }
   }
 
   async function ensureBackendReady(backendUrl) {
@@ -1269,7 +1296,16 @@
       }
     }
 
-    // Prefer the original media element: no download, login cookies or tab audio.
+    // Decode audio already buffered by YouTube without playing/rewinding it.
+    try {
+      const buffered = await transcribeBufferedWindow(videoId, getVideoTime(), 12);
+      if (!isActiveSession(sessionId)) return [];
+      if (buffered !== null) { state.bufferedAudioSource = true; return buffered; }
+    } catch (error) {
+      if (!isActiveSession(sessionId)) return [];
+      state.bufferedSourceInfo = `실시간 수집 사용: ${error.message}`;
+    }
+    // Original-element fallback for unsupported players/codecs.
     const localSegments = typeof state.video?.captureStream === "function"
       ? await captureCaptionWindow(videoId)
       : await preprocessCaptionSegments(videoId, cached);
@@ -1976,6 +2012,48 @@
     }
   }
 
+  function requestBufferedAudio(videoId) {
+    return new Promise(resolve => {
+      const id = crypto.randomUUID();
+      const done = value => { clearTimeout(timer); window.removeEventListener("message", receive); resolve(value); };
+      const receive = event => {
+        if (event.source !== window || event.origin !== location.origin || event.data?.source !== "YLD_BUFFER_RESPONSE" ||
+            event.data.id !== id || event.data.videoId !== videoId) return;
+        done(event.data);
+      };
+      const timer = setTimeout(() => done(null), 1200);
+      window.addEventListener("message", receive);
+      window.postMessage({source:"YLD_BUFFER_REQUEST",id,videoId,read:true}, location.origin);
+    });
+  }
+
+  async function transcribeBufferedWindow(videoId, start, duration) {
+    const sessionId = state.sessionId;
+    if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(els.backend.value)) return null;
+    const snapshot = await requestBufferedAudio(videoId);
+    if (!isActiveSession(sessionId)) return null;
+    const range = snapshot?.ranges?.find(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start <= start + 0.1 && item.end > start + 0.5);
+    if (!snapshot?.available || !range || !(snapshot.audio instanceof ArrayBuffer) || snapshot.audio.byteLength > 8 * 1024 * 1024) {
+      state.bufferedSourceInfo = "재생 버퍼 대기"; return null;
+    }
+    const end = Math.min(start + duration, range.end, state.video.duration);
+    if (end - start < Math.min(3, state.video.duration - start)) return null;
+    const bytes = new Uint8Array(snapshot.audio);
+    let binary = "";
+    for (let i=0;i<bytes.length;i+=8192) binary += String.fromCharCode(...bytes.subarray(i,i+8192));
+    state.bufferedSourceInfo = `미리 준비 ${formatTime(start)}–${formatTime(end)} · 내려받은 원음 ${formatTime(range.end)}까지`;
+    if (state.startupPreparing) { setStatus("빠른 원음 인식"); updateMeta(videoId, state.bufferedSourceInfo, "영상을 되감지 않고 다음 구간도 미리 준비합니다"); }
+    const response = await sendRuntimeMessage({type:"YLD_TRANSCRIBE_CAPTURE",payload:{
+      backendUrl:els.backend.value, videoId, start, end, audio:btoa(binary), buffered:true,
+    }});
+    if (!isActiveSession(sessionId)) return null;
+    if (!response?.ok) throw new Error(response?.error || "버퍼 음성인식 실패");
+    updateTranscriptWindows(response.payload);
+    state.bufferedInferenceMs = response.payload.inferenceMs || 0;
+    state.bufferedSourceInfo = `미리 준비 완료 ${formatTime(end)}까지`;
+    return normalizePreprocessSegments(response.payload?.segments);
+  }
+
   async function captureCaptionWindow(videoId) {
     const sessionId = state.sessionId;
     const video = state.video;
@@ -1986,7 +2064,7 @@
       throw new Error("광고가 끝난 일반 유튜브 영상에서 다시 시작해 주세요.");
     }
     const start = video.currentTime;
-    const duration = Math.min(25, video.duration - start);
+    const duration = Math.min(8, video.duration - start);
     if (duration < 0.5) return [];
     state.browserAudioSource = true;
     state.captureProcessing = true;
@@ -2216,7 +2294,7 @@
   }
 
   function maybeExpandTranscriptCoverage(videoTime) {
-    if (!state.running || state.transcriptExpanding || (!state.sourceSegments.length && !state.browserAudioSource)) {
+    if (!state.running || state.transcriptExpanding || (!state.sourceSegments.length && !state.browserAudioSource && !state.bufferedAudioSource)) {
       return;
     }
 
@@ -2236,6 +2314,35 @@
       (remainingTranscript > STT_EXTENSION_THRESHOLD_SECONDS && chunksRemaining > 10)
       )
     ) {
+      return;
+    }
+
+    if (state.bufferedAudioSource && state.bufferedFailures >= 3 && remainingTranscript < 1) {
+      state.bufferedAudioSource = false;
+      state.browserAudioSource = true;
+      state.bufferedSourceInfo = "재생 버퍼를 읽을 수 없어 8초 실시간 수집으로 전환";
+    }
+    if (state.bufferedAudioSource) {
+      if (Date.now() < state.bufferedRetryAt || (!missingCurrentWindow && remainingTranscript > 24) ||
+          (state.preparingChunks && remainingTranscript > 12)) return;
+      const sessionId = state.sessionId;
+      state.transcriptExpanding = true;
+      state.bufferedRetryAt = Date.now() + 1500;
+      transcribeBufferedWindow(state.videoId, missingCurrentWindow ? videoTime : lastEnd, 24).then(segments => {
+        if (!isActiveSession(sessionId)) return;
+        if (segments === null) { state.bufferedFailures++; return; }
+        state.bufferedFailures = 0;
+        maybeInstallExpandedSegments(segments);
+      }).catch(error => {
+        if (!isActiveSession(sessionId)) return;
+        state.bufferedFailures++;
+        state.bufferedSourceInfo = `다음 구간 준비 재시도: ${error.message}`;
+        state.bufferedRetryAt = Date.now() + 5000;
+      }).finally(() => {
+        if (!isActiveSession(sessionId)) return;
+        state.transcriptExpanding = false;
+        maybePrepareMoreAudio(getVideoTime(), "prefetch-complete");
+      });
       return;
     }
 
@@ -2814,7 +2921,7 @@
   function selectUnpreparedChunksForWindow(chunks, currentTime) {
     return selectChunksForWindow(chunks, currentTime)
       .filter((chunk) => !state.preparedChunkIndexes.has(chunk.index))
-      .slice(0, MAX_PREPARE_CHUNKS);
+      .slice(0, state.bufferedAudioSource ? (state.startupPreparing ? 3 : 2) : MAX_PREPARE_CHUNKS);
   }
 
   function formatAudioState(label, videoTime) {
@@ -3350,7 +3457,12 @@
     const finite = value => Number.isFinite(value) ? value.toFixed(2) : "—";
     const mode = media => !media ? "없음" : media.error ? "오류" : media.ended ? "완료" : media.paused ? "일시정지" : "재생 중";
     els.diagnostics.textContent = [
-      '재생 코드: explicit-start-v3',
+      '재생 코드: buffered-prefetch-v1',
+      state.metrics ? `첫 더빙: ${state.metrics.firstAudioMs === null ? '준비 중' : (state.metrics.firstAudioMs / 1000).toFixed(2) + '초'} · 최근 준비: ${(state.metrics.lastPrepareMs / 1000).toFixed(2)}초` : "",
+      state.metrics ? `버퍼 대기: ${state.metrics.bufferWaits}회 · 대기 시간: ${(state.metrics.bufferWaitMs / 1000).toFixed(2)}초 · 문장 끝 보존: ${state.metrics.tailWaits}회 · 재생 클립: ${state.metrics.playedClips}` : "",
+      `최근 원음 인식: ${(state.bufferedInferenceMs / 1000).toFixed(2)}초`,
+      `원음 경로: ${state.bufferedAudioSource ? '재생 버퍼 미리 준비' : state.browserAudioSource ? '실시간 수집' : '자막'} · ${state.bufferedSourceInfo}`,
+      `자막 준비: ${finite(getKnownTranscriptEndAt(video?.currentTime || 0))}초까지`,
       `유튜브 페이지 연결: ${state.pageProbeStatus}`,
       `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
       `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
@@ -3361,8 +3473,6 @@
       item?.voiceId ? `음색: ${item.voiceId}${item.speaker ? ' · ' + ({male:'남성 음색',female:'여성 음색',unknown:'기본 음색 (판별 불가)'}[item.speaker.label] || '기본 음색') : ''}` : "",
       item?.sourceText ? `원문: ${item.sourceText}` : "",
       item?.translatedText ? `번역: ${item.translatedText}` : "",
-      state.metrics ? `첫 더빙: ${state.metrics.firstAudioMs === null ? '준비 중' : (state.metrics.firstAudioMs / 1000).toFixed(2) + '초'} · 최근 준비: ${(state.metrics.lastPrepareMs / 1000).toFixed(2)}초` : "",
-      state.metrics ? `버퍼 대기: ${state.metrics.bufferWaits}회 · 문장 끝 보존: ${state.metrics.tailWaits}회 · 재생 클립: ${state.metrics.playedClips}` : "",
       state.playbackHold ? (state.playbackHold.reason === 'tail' ? '문장을 끝까지 읽은 뒤 영상 재개' : '더빙 준비 후 영상과 함께 재개') : "",
     ].filter(Boolean).join("\n");
   }

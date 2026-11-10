@@ -17,7 +17,7 @@ bash install-macos.command
 
 설치기는 없는 Node, Python 3.12, FFmpeg, Ollama를 Homebrew로 설치합니다.
 Node는 22 이상이 필요합니다. 프로젝트의 `.venv`에 Python 패키지를 격리하며,
-Gemma 4 E4B, Supertonic 3, Whisper small을 다운로드합니다. 첫 설치에는 수 GB의
+Gemma 4 E4B, Supertonic 3, Whisper base을 다운로드합니다. 첫 설치에는 수 GB의
 여유 공간과 다운로드 시간이 필요합니다. 음성 인식은 CPU/int8을 사용하고,
 Ollama의 번역 가속은 해당 Mac의 Ollama 설치 환경을 따릅니다. CUDA는 설치하지 않습니다.
 

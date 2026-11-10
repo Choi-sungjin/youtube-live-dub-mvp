@@ -43,7 +43,8 @@ for line in sys.stdin:
         with contextlib.redirect_stdout(sys.stderr):
             segments, info = model.transcribe(request["inputPath"],
                 language=None if request.get("language", "auto") == "auto" else request["language"],
-                beam_size=5, best_of=5, temperature=0, word_timestamps=True,
+                beam_size=1 if request.get("lowLatency") else 5,
+                best_of=1 if request.get("lowLatency") else 5, temperature=0, word_timestamps=True,
                 vad_filter=True, condition_on_previous_text=True,
                 initial_prompt=os.environ.get('YLD_STT_PROMPT') or None)
             items = [{"start": item.start, "end": item.end, "text": item.text,
