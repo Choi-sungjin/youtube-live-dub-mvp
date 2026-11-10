@@ -9,7 +9,7 @@ import { createLocalTranslator, LOCAL_TRANSLATION_REVISION, DEFAULT_LOCAL_MODEL 
 import { translationContext } from './caption-context.js';
 import { applyVerifiedCaptionTerms } from './verified-caption-terms.js';
 import { speechText, SPEECH_TEXT_REVISION, normalizeDubbingTranslation } from './speech-text.js';
-import { createApiSettingsHandler, loadPanelApiKey } from './api-settings.js';
+import { createApiSettingsHandler, loadPanelApiKey, testOpenAiConnection } from './api-settings.js';
 import { createCaptureHandler } from './capture-stt.js';
 import { createMediaRouter } from './media-router.js';
 import { createHash } from 'node:crypto';
@@ -71,15 +71,10 @@ const SUPERTONE_VOICES = {
 await mkdir(AUDIO_DIR, { recursive: true });
 await mkdir(STT_DIR, { recursive: true });
 await mkdir(AUDIT_DIR, { recursive: true });
-const apiSettingsHandler = createApiSettingsHandler({ filename: PANEL_API_FILE, testConnection: async () => {
-  const started = Date.now();
-  const result = await prepareDub({ videoId: `api-test-${Date.now()}`, source: 'self-test', currentTime: 0,
-    settings: { mode: 'gpt', targetLang: 'ko', voice: 'marin' },
-    segments: [{ index: 0, start: 0, end: 4, text: 'The robot moves forward and turns left.' }] });
-  const segment = result.segments[0];
-  return { ok: true, elapsedMs: Date.now() - started, translatedText: segment.translatedText,
-    audioUrl: segment.audioUrl, duration: segment.duration };
-} });
+const apiSettingsHandler = createApiSettingsHandler({ filename: PANEL_API_FILE, testConnection: () => testOpenAiConnection({
+  translate: translateOpenAI, synthesize: synthesizeOpenAISpeech,
+  audioDir: AUDIO_DIR, audioBaseUrl: `http://${HOST}:${PORT}/audio`,
+}) });
 const captureHandler = createCaptureHandler({ cacheDir: CACHE_DIR, transcribe: transcribeFast });
 const mediaRoute = createMediaRouter({ root: ROOT_DIR, transcribe: transcribeFast, prepare: prepareDub });
 

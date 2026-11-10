@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import vm from 'node:vm';
-import { createApiSettingsHandler, loadPanelApiKey } from '../backend/api-settings.js';
+import { createApiSettingsHandler, loadPanelApiKey, testOpenAiConnection } from '../backend/api-settings.js';
 const fixtureKey = 'sk-fixture-only-not-a-real-api-key';
 const request = (body, headers = {}) => Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), {
   method: 'POST', headers: { host: '127.0.0.1:18789', 'content-type': 'application/json', 'x-yld-settings': '1', ...headers }
@@ -65,4 +65,13 @@ test('only the extension-owned key popup may forward key operations to loopback'
   await assert.rejects(context.apiSettingsRequest(payload,other));
  await assert.rejects(context.apiSettingsRequest({...payload,backendUrl:'https://example.vercel.app'},sender));
  assert.equal(calls,1);
+});
+
+test('repeated connection tests invoke text and voice providers afresh rather than cached dubbing',async()=>{
+ let texts=0,voices=0;const files=[];
+ const options={audioDir:'fixture',audioBaseUrl:'http://127.0.0.1:18789/audio',
+  translate:async()=>{texts++;return new Map([[0,'한국어 실제 테스트']]);},
+  synthesize:async({text,outputPath})=>{assert.equal(text,'한국어 실제 테스트');voices++;files.push(outputPath);return {duration:1,ttsModel:'fixture'};}};
+ for(let i=0;i<2;i++)assert.equal((await testOpenAiConnection(options)).ok,true);
+ assert.equal(texts,2);assert.equal(voices,2);assert.notEqual(files[0],files[1]);
 });

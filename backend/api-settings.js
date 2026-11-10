@@ -1,5 +1,6 @@
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const validKey = key => typeof key === 'string' && /^sk-[A-Za-z0-9_-]{20,500}$/.test(key);
@@ -48,4 +49,17 @@ export function createApiSettingsHandler({ filename, testConnection, env = proce
       return { ...status(), saved: true };
     } finally { busy = false; }
   };
+}
+
+// Connection checks always hit both providers; normal dubbing caches cannot
+// prove that the current key still has text and voice model access.
+export async function testOpenAiConnection({ translate, synthesize, audioDir, audioBaseUrl }) {
+  const started = Date.now(), metrics = {};
+  const settings = { targetLang: 'ko', voice: 'marin' };
+  const translated = await translate([{ index: 0, text: 'The robot moves forward and turns left.' }], settings, metrics);
+  const translatedText = translated.get(0);
+  const filename = `api-test-${randomUUID()}.wav`;
+  const voice = await synthesize({ text: translatedText, settings, outputPath: path.join(audioDir, filename) });
+  return { ok: true, elapsedMs: Date.now() - started, translatedText, duration: voice.duration,
+    audioUrl: `${audioBaseUrl}/${filename}`, textModel: metrics.openaiTextModel, voiceModel: voice.ttsModel };
 }
