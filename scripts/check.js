@@ -7,7 +7,7 @@ async function collect(dir) {
     if (entry.name.startsWith('.')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) await collect(full);
-    else if (/\.(c?js)$/.test(entry.name)) files.push(full);
+    else if (/\.[cm]?js$/.test(entry.name)) files.push(full);
   }
 }
 for (const dir of ['api', 'backend', 'extension', 'lib', 'native-host', 'scripts']) await collect(dir);

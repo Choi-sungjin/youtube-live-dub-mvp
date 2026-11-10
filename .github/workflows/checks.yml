@@ -1,0 +1,25 @@
+name: Windows Linux macOS checks
+on:
+  push:
+  pull_request:
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:cloud
+      - name: Check Mac launcher shell syntax
+        if: runner.os != 'Windows'
+        run: |
+          for script in install-macos.command start-macos.command stop-macos.command scripts/macos-common.sh; do
+            bash -n "$script" || exit 1
+          done

@@ -1,4 +1,18 @@
-# Local Live Dub · v0.8.5
+# Local Live Dub · v0.8.6
+
+## 운영체제별 설치 · v0.8.6
+
+동일한 Chrome 확장과 백엔드를 Windows, Linux, macOS에서 사용합니다.
+
+| 운영체제 | 처음 설치 | 다음 실행 | 안내 |
+|---|---|---|---|
+| Windows | `install-windows.cmd` | `scripts/start-local.ps1` | [Windows](docs/auto-install-windows.md) |
+| Linux (Ubuntu) | 가상환경·패키지·모델 설치 | `PATH="$PWD/.venv/bin:$PATH" node backend/server.js` | [Linux](docs/install-linux.md) |
+| macOS / MacBook | `install-macos.command` | `start-macos.command` | [Mac](docs/install-macos.md) |
+
+Mac용 설치·시작·종료 실행기를 추가했습니다. 로컬 설정과 키를 보존하며, Python 3.12
+가상환경·CPU 음성 인식·Ollama 번역·Supertonic 음성을 준비합니다. Mac에서 서버를
+종료할 때는 `stop-macos.command`를 사용합니다. Chrome 확장은 운영체제 공통입니다.
 
 <img src="extension/icons/icon-128.png" alt="Live Dub 아이콘" width="64" height="64">
 
@@ -48,7 +62,7 @@ Ubuntu 설치·시작 절차는 [Linux 안내](docs/install-linux.md)를 참고�
 
 **Windows 자동 설치:** 전체 ZIP을 압축 해제한 뒤 **`install-windows.cmd`를 더블클릭**하면 필수 도구·모델 다운로드, GPU/CPU 선택, 로컬 설정과 서버 시작을 진행합니다. 기본 음성 1.15배를 유지합니다. [자동 설치 포함 최신 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip)와 [자동 설치 안내](docs/auto-install-windows.md)를 참고하세요. Chrome에서 `extension` 폴더를 불러오는 단계는 마지막에 직접 수행합니다.
 
-최신 배포 코드는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main)에서 받으세요. [최신 소스 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip). 저장소가 Private이므로 접근 권한이 있는 GitHub 계정으로 로그인해야 합니다. ZIP은 압축을 풀고, Git을 사용할 경우 아래 명령으로 받으세요.
+최신 배포 코드는 [main 브랜치](https://github.com/Choi-sungjin/youtube-live-dub-mvp/tree/main)에서 받으세요. [최신 소스 ZIP 다운로드](https://github.com/Choi-sungjin/youtube-live-dub-mvp/archive/refs/heads/main.zip). ZIP은 압축을 풀고, Git을 사용할 경우 아래 명령으로 받으세요.
 
 ```powershell
 git clone --branch main https://github.com/Choi-sungjin/youtube-live-dub-mvp.git
@@ -65,7 +79,7 @@ cd "$env:USERPROFILE\youtube-live-dub-mvp"
 
 1. 크롬의 `chrome://extensions`에서 기존 확장을 새로고침하거나, 개발자 모드의 압축해제 확장 불러오기로 `extension/` 폴더를 선택합니다.
 2. 유튜브 영상을 새로고침합니다. 패널이 숨겨졌다면 확장 아이콘을 클릭하거나 Alt+Shift+Y를 누릅니다.
-3. 패널 버전 **0.8.5**, Backend **http://127.0.0.1:18789**를 확인합니다.
+3. 패널 버전 **0.8.6**, Backend **http://127.0.0.1:18789**를 확인합니다.
 4. 기본 음성 엔진 **Supertonic 3 · 로컬 음성 · 1.15배**에서 **Test**, **Start** 순서로 확인합니다.
 5. 자동 서버 시작을 쓰려면 [native host 설치 안내](native-host/README.md)를 참고합니다. 수동 서버 실행 상태에서는 설치 없이 백엔드 연결이 가능합니다.
 
