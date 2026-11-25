@@ -1,18 +1,16 @@
-# Local Live Dub · v0.8.6
+# Local Live Dub · v0.9.2
 
-## 운영체제별 설치 · v0.8.6
+## 운영체제별 설치 · v0.9.2
 
 동일한 Chrome 확장과 백엔드를 Windows, Linux, macOS에서 사용합니다.
 
 | 운영체제 | 처음 설치 | 다음 실행 | 안내 |
 |---|---|---|---|
 | Windows | `install-windows.cmd` | `scripts/start-local.ps1` | [Windows](docs/auto-install-windows.md) |
-| Linux (Ubuntu) | 가상환경·패키지·모델 설치 | `PATH="$PWD/.venv/bin:$PATH" node backend/server.js` | [Linux](docs/install-linux.md) |
+| Linux (Ubuntu) | 가상환경·패키지·모델 설치 | `systemctl --user restart youtube-live-dub.service` | [Linux](docs/install-linux.md) |
 | macOS / MacBook | `install-macos.command` | `start-macos.command` | [Mac](docs/install-macos.md) |
 
-Mac용 설치·시작·종료 실행기를 추가했습니다. 로컬 설정과 키를 보존하며, Python 3.12
-가상환경·CPU 음성 인식·Ollama 번역·Supertonic 음성을 준비합니다. Mac에서 서버를
-종료할 때는 `stop-macos.command`를 사용합니다. Chrome 확장은 운영체제 공통입니다.
+Mac용 설치·시작·종료 실행기를 지원하며 로컬 설정과 키를 보존합니다. Chrome 확장은 운영체제 공통입니다.
 
 <img src="extension/icons/icon-128.png" alt="Live Dub 아이콘" width="64" height="64">
 
@@ -40,7 +38,7 @@ YouTube 패널의 **설정**에서 번역과 음성을 조합합니다. Gemma 4�
 
 원문 자막 수집·로컬 음성 인식은 공통입니다. GPT가 포함된 단계의 텍스트만 OpenAI에 전송하며 API 사용료가 발생합니다. 키는 서버에만 저장합니다. 모드 변경 시 기존 더빙을 멈추고 다음 시작부터 적용합니다. 첫 문장의 번역·음성이 준비되면 재생하고, 이어지는 문장을 순서대로 준비합니다. 문장 하나의 오디오 생성 완료 후 재생하는 방식이며, 생성 중인 PCM 조각을 브라우저에서 즉시 재생하는 방식은 아닙니다.
 
-GPT 기본 모델은 번역 `gpt-6-luna`, 음성 `gpt-realtime-2.1-mini`입니다. `OPENAI_MODEL`, `OPENAI_VOICE_MODEL`로 변경할 수 있으며 해당 API·기능을 지원하는 모델이어야 합니다. 로컬 음성 속도는 1.15배, GPT 음성은 1배입니다.
+GPT 기본 모델은 번역 `gpt-6.2-sol`(패널 설정에서 `gpt-6.2-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna` 및 `Fast`/`Ultrafast` 응답 속도 선택 가능), 음성 `gpt-realtime-2.1-mini`입니다. `OPENAI_MODEL`, `OPENAI_VOICE_MODEL`로 변경할 수 있으며 해당 API·기능을 지원하는 모델이어야 합니다. 로컬 음성 속도는 1.15배, GPT 음성은 1배입니다.
 
 ```bash
 npm ci
@@ -168,6 +166,16 @@ API 키는 서버의 환경 파일에서 읽고 브라우저에 전달하지 않
 - 더빙 정지: **Alt+Shift+D**
 
 패널의 **설정 → 단축키 변경**에서 크롬 단축키 설정을 열고 원하는 키로 변경할 수 있습니다. 설정에는 실제 등록된 키가 표시되며, 충돌 등으로 키가 등록되지 않았으면 `미지정`으로 표시합니다. 시작/정지는 현재 유튜브 영상 탭에만 적용됩니다. 반복 시작은 중복 작업을 만들지 않으며, 정지는 더빙 음성과 대기 작업을 중단합니다. 확장 연결이 끊겼다면 먼저 패널을 복구한 뒤 시작하세요.
+
+### v0.8.6 OpenAI 연결이 불안정할 때
+
+GPT 번역·음성 요청이 네트워크 문제로 실패하면 세 단계로 더빙을 이어갑니다.
+
+1. **재시도:** 연결 오류, 시간 초과, 429 요청 한도, 5xx는 0.5초·1.5초 뒤 최대 두 번 더 시도합니다. API 키 오류, 모델 권한 없음, 크레딧 소진은 재시도하지 않고 원인을 바로 표시합니다.
+2. **로컬 대체:** 재시도 후에도 OpenAI에 연결되지 않으면 그 구간만 로컬 Gemma 번역과 Supertonic 3 음성으로 만듭니다. 남성·여성 음색은 유지하며, 20초 동안은 OpenAI를 건너뛰고 로컬로 바로 처리한 뒤 다시 OpenAI를 시도합니다. 대체한 결과는 GPT 캐시에 저장하지 않습니다.
+3. **원음 재생:** 로컬 대체까지 실패한 구간은 한 번 더 시도한 뒤 더빙을 멈추지 않고 원래 음량의 원음으로 재생합니다. 연속 6회 실패하면 원인과 함께 더빙을 정지합니다.
+
+대체하거나 원음으로 재생한 구간이 있으면 패널에 노란 안내가 표시되고, **설정 → 재생 진단**에서 개수와 사유를 볼 수 있습니다. 실패와 재시도는 백엔드 로그(`journalctl --user -u youtube-live-dub`)에도 남습니다.
 
 ### v0.8.5 패널 구성
 

@@ -674,3 +674,24 @@ test('completed streamed audio is playable before its batch finishes and final r
   assert.deepEqual(Array.from(f.state.preparedChunkIndexes),[0,1]);assert.equal(f.state.prepared.length,2);
   f.stopDub();await progress(second);assert.equal(f.state.prepared.length,0);
 });
+
+test('local translator resolves an installed local Gemma 4 tag when configured model returns 404', async () => {
+  const calls = [];
+  const translator = createLocalTranslator({
+    baseUrl: 'http://127.0.0.1:11435',
+    model: 'gemma4:e4b-it-q4_K_M',
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/tags')) {
+        return { ok: true, status: 200, json: async () => ({ models: [{ name: 'bge-m3:latest' }, { name: 'gemma4:e2b' }] }) };
+      }
+      const body = JSON.parse(init.body);
+      calls.push(body.model);
+      if (body.model === 'gemma4:e4b-it-q4_K_M') return { ok: false, status: 404, body: { cancel: async () => {} } };
+      return { ok: true, status: 200, json: async () => ({ message: { content: '{"translations":[{"index":0,"text":"준비 완료."}]}' } }) };
+    }
+  });
+  const status = await translator.warm();
+  assert.equal(status.ready, true);
+  assert.equal(status.model, 'gemma4:e2b');
+  assert.deepEqual(calls, ['gemma4:e4b-it-q4_K_M', 'gemma4:e2b']);
+});

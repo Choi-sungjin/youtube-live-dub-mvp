@@ -2,22 +2,40 @@
 <html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Live Dub · 로컬 진단</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#182238;font:16px/1.6 system-ui,sans-serif}main{max-width:820px;margin:48px auto;padding:24px}h1{font-size:32px;margin:8px 0}h2{font-size:19px}p{color:#526078}.eyebrow{color:#4364c4;font-weight:700;letter-spacing:.1em}section{background:white;padding:24px;border:1px solid #dce2ec;border-radius:16px;margin-top:20px}label{display:block;font-weight:600;margin:16px 0 6px}textarea,select{width:100%;padding:12px;border:1px solid #bdc7d8;border-radius:8px;font:inherit}button{background:#315cd1;color:white;border:0;border-radius:8px;padding:12px 18px;font:inherit;font-weight:600;cursor:pointer;margin-top:18px}button:disabled{opacity:.55}audio{width:100%;margin-top:16px}output{white-space:pre-wrap;display:block;margin-top:12px}#translation{font-size:22px;color:#172b62}.muted{font-size:14px}.error{color:#b42318}#status{font-weight:700}a{color:#315cd1}
+*{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#182238;font:15.5px/1.6 system-ui,-apple-system,sans-serif}main{max-width:840px;margin:40px auto;padding:24px}h1{font-size:30px;margin:8px 0}h2{font-size:18px;margin:0 0 12px}p{color:#526078;margin:8px 0}.eyebrow{color:#315cd1;font-weight:700;letter-spacing:.08em;font-size:13px}section{background:white;padding:24px;border:1px solid #dce2ec;border-radius:16px;margin-top:20px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.badges{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.badge{padding:5px 10px;border-radius:999px;font-size:12.5px;font-weight:700;background:#eef2ff;color:#1e40af}.badge.ok{background:#ecfdf5;color:#065f46}.badge.warn{background:#fffbeb;color:#92400e}label{display:block;font-weight:600;margin:14px 0 6px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}textarea,select{width:100%;padding:11px 12px;border:1px solid #bdc7d8;border-radius:8px;font:inherit;background:#fff;color:#182238}button{background:#2557d6;color:white;border:0;border-radius:8px;padding:12px 18px;font:inherit;font-weight:650;cursor:pointer;margin-top:16px}button:hover:not(:disabled){background:#1d4ed8}button:disabled{opacity:.55;cursor:wait}audio{width:100%;margin-top:16px}output{white-space:pre-wrap;display:block;margin-top:12px;overflow-wrap:anywhere}#translation{font-size:21px;font-weight:650;color:#172b62}.muted{font-size:13.5px;color:#526078}.error{color:#b42318}#status{font-weight:700}a{color:#2557d6}@media(max-width:600px){.grid{grid-template-columns:1fr}main{margin:16px auto;padding:16px}}
 </style>
 <main><div class="eyebrow" id="version">LIVE DUB</div><h1>번역과 음성 연결 확인</h1>
-<p>로컬 서버에서 실제 번역과 음성을 확인합니다. 유튜브 확장 프로그램의 자막 수집·재생 동기화는 유튜브 페이지에서 별도로 확인해야 합니다.</p>
-<section><h2>서버 상태</h2><output id="health">확인 중…</output></section>
-<section><h2>실제 음성 테스트</h2><label for="source">원문</label><textarea id="source" rows="3" maxlength="300">The robot moves forward and then turns left.</textarea>
-<label for="provider">음성 엔진</label><select id="provider"><option value="supertonic3">Supertonic 3 · 로컬 음성 · 1.15배</option><option value="windows-sapi">Windows 로컬 한국어 음성</option><option value="supertone">Supertone API</option></select>
-<p class="muted">번역 제공자는 위 서버 상태에 표시됩니다. 로컬 Gemma 번역과 Supertonic 3 음성은 이 PC에서 처리하며, 음성 생성은 1.15배로 고정됩니다.</p>
+<p>이 PC의 로컬 서버(Gemma 4 · Supertonic 3 · Whisper STT)와 OpenAI GPT-6.2 Sol / Realtime 음성 경로를 즉시 점검합니다.</p>
+<section><h2>엔진 준비 상태</h2><div id="badges" class="badges"></div><output id="health">확인 중…</output></section>
+<section><h2>실제 더빙 합성 테스트</h2><label for="source">테스트 원문</label><textarea id="source" rows="3" maxlength="300">The robot moves forward and then turns left.</textarea>
+<div class="grid">
+  <div><label for="mode">더빙 조합 모드</label><select id="mode">
+    <option value="local">1. 모두 로컬 (Gemma 4 → Supertonic 3)</option>
+    <option value="gemma-gpt">2. 로컬 번역 · GPT 음성 (Gemma 4 → Realtime)</option>
+    <option value="gpt-local">3. GPT 번역 · 로컬 음성 (GPT-6.2 Sol → Supertonic 3)</option>
+    <option value="gpt">4. 모두 GPT (GPT-6.2 Sol → GPT Realtime)</option>
+  </select></div>
+  <div><label for="voice">음색</label><select id="voice"><option value="auto">자동 · 기본 음색</option><option value="M1">로컬 M1 · 남성</option><option value="F1">로컬 F1 · 여성</option><option value="marin">GPT marin</option><option value="cedar">GPT cedar</option></select></div>
+</div>
+<p class="muted">1번 모드는 외부 API 요금이 없으며, 2~4번 모드는 등록된 OpenAI API 키를 사용합니다.</p>
 <button id="test">번역·음성 생성</button><output id="status" aria-live="polite">준비됨</output><output id="translation"></output><audio id="audio" controls hidden></audio><output id="detail" class="muted"></output>
-</section><section><h2>크롬에서 이어서 확인</h2><p>확장 프로그램을 새로고침한 뒤 유튜브 영상을 새로고침하세요. 패널의 <b>음성 엔진 → Supertonic 3</b>을 선택하고 <b>Test</b>, <b>Start</b> 순서로 확인합니다.</p><p class="muted">로컬 테스트 성공은 크롬 확장 프로그램 전체의 동작 검증을 의미하지 않습니다.</p></section></main>
+</section><section><h2>유튜브 · 로컬 플레이어 안내</h2><p>유튜브 영상 탭에서는 확장 아이콘(또는 <kbd>Alt+Shift+Y</kbd>)으로 패널을 열어 1~4번 모드를 바로 시작할 수 있으며, 일반 MP4 파일·웹영상은 <a href="/player">로컬 플레이어 열기</a>에서 재생할 수 있습니다.</p></section></main>
 <script>
 const $=id=>document.getElementById(id);
-fetch('/api/health').then(r=>r.json()).then(h=>{$('version').textContent=`LIVE DUB / v${h.version||'?'}`;for(const option of [...$('provider').options]){if(!h.ttsProviders?.includes(option.value))option.remove();}$('health').textContent=`서버 v${h.version||'?'} · ${h.platform||'?'}\n번역: ${h.provider.translation} · ${h.provider.translationModel||''} · ${h.provider.translationLocation==='local'?'PC에서 처리':'외부 API 또는 테스트'}${h.provider.translation==='ollama'?`\nGemma 모델: ${h.localTranslation?.ready?'준비 완료':h.localTranslation?.warming?'미리 불러오는 중':'미준비'}${h.localTranslation?.lastError?' / '+h.localTranslation.lastError:''}`:''}\n사용 가능 음성 경로: ${(h.ttsProviders||[]).join(', ')}`}).catch(e=>{$('health').textContent=e.message});
+function badge(text,ok){const s=document.createElement('span');s.className=`badge ${ok?'ok':'warn'}`;s.textContent=text;return s;}
+fetch('/api/health').then(r=>r.json()).then(h=>{
+  $('version').textContent=`LIVE DUB · v${h.version||'?'}`;
+  const b=$('badges');b.replaceChildren(
+    badge(`Gemma (${h.localTranslation?.model||'ollama'}): ${h.localTranslation?.ready?'준비됨':'대기/점검'}`,Boolean(h.localTranslation?.ready)),
+    badge(`Supertonic 3: ${h.supertonic?.ready?'준비됨':'대기'}`,Boolean(h.supertonic?.ready)),
+    badge(`Whisper STT (${h.stt?.model||'small'}): ${h.stt?.ready?'준비됨':'대기'}`,Boolean(h.stt?.ready)),
+    badge(`OpenAI (${h.provider?.openaiModel||'gpt-6.2-sol'}): ${h.provider?.openaiConfigured?'키 등록됨':'미등록'}`,Boolean(h.provider?.openaiConfigured))
+  );
+  $('health').textContent=`서버 v${h.version||'?'} · 플랫폼 ${h.platform||'?'}\n로컬 번역: ${h.localTranslation?.model||'미확인'} (${h.localTranslation?.ready?'정상 연결':'미준비'}${h.localTranslation?.lastError?' — '+h.localTranslation.lastError:''})\nGPT 기본 모델: 번역 ${h.provider?.openaiModel||'gpt-6.2-sol'} · 음성 ${h.provider?.openaiVoiceModel||'gpt-realtime-2.1-mini'}`;
+}).catch(e=>{$('health').textContent=e.message});
 $('test').addEventListener('click',async()=>{
  $('test').disabled=true;$('audio').pause();$('audio').hidden=true;$('translation').textContent='';$('detail').textContent='';$('status').className='';$('status').textContent='한국어 번역·음성 생성 중…';const started=performance.now();
- try{const response=await fetch('/api/dub/prepare',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoId:'local-diagnostics',source:'manual-diagnostics',settings:{targetLang:'ko',ttsProvider:$('provider').value,speed:1.15},segments:[{index:0,start:0,end:5,text:$('source').value}]}),signal:AbortSignal.timeout(90000)});const result=await response.json();if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);const segment=result.segments?.[0];if(!segment?.audioUrl)throw new Error('재생할 음성이 없습니다.');$('translation').textContent=segment.translatedText;$('audio').src=segment.audioUrl;$('audio').hidden=false;$('detail').textContent=`번역: ${result.requestProvider.translation} · 음성: ${result.requestProvider.tts} · 생성 배속: ${segment.speechSpeed}배 · 합성: ${segment.synthesisMs}ms · 길이: ${segment.duration}초 · 응답: ${((performance.now()-started)/1000).toFixed(2)}초 · 캐시: ${result.cache.hit?'재사용':'새로 생성'}`;$('status').textContent='번역·음성 생성 완료 — 아래 재생 버튼으로 들을 수 있습니다.';
+ try{const response=await fetch('/api/dub/prepare',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoId:'local-diagnostics',source:'manual-diagnostics',settings:{mode:$('mode').value,voice:$('voice').value,targetLang:'ko'},segments:[{index:0,start:0,end:5,text:$('source').value}]}),signal:AbortSignal.timeout(90000)});const result=await response.json();if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);const segment=result.segments?.[0];if(!segment?.audioUrl)throw new Error('재생할 음성이 없습니다.');$('translation').textContent=segment.translatedText;$('audio').src=segment.audioUrl;$('audio').hidden=false;$('detail').textContent=`번역: ${result.requestProvider.translation} · 음성: ${segment.ttsModel||result.requestProvider.tts} (${segment.voiceId}) · 배속: ${segment.speechSpeed}배 · 합성: ${segment.synthesisMs}ms · 길이: ${segment.duration}초 · 총 소요: ${((performance.now()-started)/1000).toFixed(2)}초 · 캐시: ${result.cache.hit?'재사용':'새로 생성'}${segment.fallback?' · 로컬 대체 작동':''}`;$('status').textContent='번역·음성 생성 완료 — 아래 재생 버튼으로 들어보세요.';
  }catch(e){$('status').className='error';$('status').textContent=e.message}finally{$('test').disabled=false}
 });
 $('audio').addEventListener('playing',()=>{$('status').textContent='한국어 음성 재생 중'});

@@ -48,5 +48,6 @@ $('start').onclick=()=>engine.start();$('pause').onclick=()=>engine.pause();$('s
 function seek(value){if(media)video.currentTime=Math.max(0,Math.min(media.duration-0.05,value));}
 $('back').onclick=()=>seek(video.currentTime-10);$('forward').onclick=()=>seek(video.currentTime+10);$('go').onclick=()=>seek(Number($('seek').value)||0);
 window.addEventListener('pagehide',()=>engine.dispose());
+fetch('/api/health').then(r=>r.json()).then(h=>{if(h?.version&&$('player-version'))$('player-version').textContent=`LOCAL LIVE DUB · v${h.version}`;}).catch(()=>{});
 try{({token}=await request('/api/media/session'));const params=new URLSearchParams(location.hash.slice(1));if(params.get('url'))$('url').value=params.get('url');}
 catch(error){$('error').textContent=error.message;}

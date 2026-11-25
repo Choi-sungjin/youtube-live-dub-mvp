@@ -9,7 +9,10 @@ async function request(action, key) {
   if (!response?.ok) throw new Error(response?.error || '로컬 서버에 연결하지 못했습니다.');
   return response.payload;
 }
-function showStatus(data) { status.textContent = data.configured ? 'OpenAI 키 등록됨 · 연결 테스트 가능' : 'OpenAI 키 미등록'; }
+function showStatus(data) {
+  const models = data.textModel ? ` (${data.textModel} · ${data.voiceModel || 'gpt-realtime-2.1-mini'})` : '';
+  status.textContent = data.configured ? `OpenAI 키 등록됨${models} · 연결 테스트 가능` : 'OpenAI 키 미등록';
+}
 async function perform(work) {
   if (busy) return;
   busy = true;
@@ -30,11 +33,16 @@ document.querySelector('#delete').addEventListener('click', () => {
 });
 document.querySelector('#test').addEventListener('click', () => {
   void perform(async () => {
-    if (input.value.trim()) throw new Error('입력한 키를 먼저 저장해 주세요.');
+    const typedKey = input.value.trim();
+    if (typedKey) {
+      input.value = '';
+      showStatus(await request('save', typedKey));
+    }
     audio.pause(); audio.hidden = true;
     result.textContent = 'OpenAI 번역·음성을 확인하고 있습니다…';
     const data = await request('test');
-    result.textContent = `번역·음성 연결 성공 · ${(data.elapsedMs / 1000).toFixed(1)}초\n${data.translatedText}`;
+    const modelInfo = data.textModel ? ` [${data.textModel} → ${data.voiceModel}]` : '';
+    result.textContent = `번역·음성 연결 성공${modelInfo} · ${(data.elapsedMs / 1000).toFixed(1)}초\n${data.translatedText}`;
     audio.src = data.audioUrl; audio.hidden = false;
     await audio.play().catch(() => {});
   });

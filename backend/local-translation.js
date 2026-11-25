@@ -115,8 +115,22 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
     throw new Error('Local translation requires a loopback Ollama HTTP address.');
   }
   if (/cloud/i.test(model)) throw new Error('A cloud model cannot be used for local translation.');
+  let activeModel = model;
   let ready = false, warming = null, warmedMs = null, lastError = '', calls = 0, lastUsedAt = 0;
   const endpoint = new URL('/api/chat', origin).href;
+  const tagsEndpoint = new URL('/api/tags', origin).href;
+
+  async function resolveFallbackModel() {
+    try {
+      const response = await fetchImpl(tagsEndpoint, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(5000) });
+      if (!response?.ok) return null;
+      const data = await response.json();
+      const names = (Array.isArray(data?.models) ? data.models : [])
+        .map(m => String(m?.name || '').trim())
+        .filter(name => name && !/cloud/i.test(name));
+      return names.find(n => /^gemma4:/i.test(n)) || names.find(n => /^gemma3:/i.test(n)) || null;
+    } catch { return null; }
+  }
 
   async function chat(payload, systemPrompt = SYSTEM_PROMPT) {
     if (payload.target_language !== 'ko' && systemPrompt === SYSTEM_PROMPT) systemPrompt = OTHER_LANGUAGE_PROMPT;
@@ -128,16 +142,25 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
         } },
       },
     } };
+    const sendChat = m => fetchImpl(endpoint, {
+      method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: m, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: JSON.stringify(payload) }],
+        stream: false, think: false, format, keep_alive: '30m',
+        options: { temperature: 0, num_ctx: 4096, num_predict: 2048 } }),
+      signal: AbortSignal.timeout(120000),
+    });
     let response;
     try {
-      response = await fetchImpl(endpoint, {
-        method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: JSON.stringify(payload) }],
-          stream: false, think: false, format, keep_alive: '30m',
-          options: { temperature: 0, num_ctx: 4096, num_predict: 2048 } }),
-        signal: AbortSignal.timeout(120000),
-      });
-      if (!response.ok) throw new Error(`Ollama returned HTTP ${response.status}. Check that ${model} is installed locally.`);
+      response = await sendChat(activeModel);
+      if (response.status === 404) {
+        const fallback = await resolveFallbackModel();
+        if (fallback && fallback !== activeModel) {
+          await response.body?.cancel?.().catch?.(() => {});
+          activeModel = fallback;
+          response = await sendChat(activeModel);
+        }
+      }
+      if (!response.ok) throw new Error(`Ollama returned HTTP ${response.status}. Check that ${activeModel} is installed locally.`);
       const result = await response.json();
       if (result.done_reason === 'length') throw new Error('Local translation output exceeded its token limit.');
       ready = true; lastError = ''; calls++; lastUsedAt = Date.now();
@@ -148,7 +171,7 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
     }
   }
 
-  function status() { return { provider: 'ollama', model, revision: LOCAL_TRANSLATION_REVISION, ready, warming: Boolean(warming), warmedMs, calls, lastError }; }
+  function status() { return { provider: 'ollama', model: activeModel, revision: LOCAL_TRANSLATION_REVISION, ready, warming: Boolean(warming), warmedMs, calls, lastError }; }
   async function warm({ refresh = false } = {}) {
     if (warming) return warming;
     if (ready && (!refresh || Date.now() - lastUsedAt < 10 * 60 * 1000)) return status();
@@ -193,7 +216,7 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
       return errors;
     };
     const translated = new Map();
-    metrics.localModel = model;
+    metrics.localModel = activeModel;
     metrics.localRevision = LOCAL_TRANSLATION_REVISION;
     metrics.localRequests = 0;
     metrics.lengthRepairSegments = 0;

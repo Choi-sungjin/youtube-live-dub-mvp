@@ -76,6 +76,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({
         ok: false,
         error: error && error.message ? error.message : String(error),
+        retryable: typeof error?.retryable === "boolean" ? error.retryable : undefined,
       });
     });
 
@@ -87,10 +88,10 @@ function callNativeHost(action, payload) {
     const port = portFromBackendUrl(payload && payload.backendUrl);
 
     try {
-      chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action, port }, (response) => {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action, port }, async (response) => {
         const lastError = chrome.runtime.lastError;
         if (lastError) {
-          reject(new Error(formatNativeHostError(lastError.message)));
+          reject(new Error(await formatNativeHostError(lastError.message)));
           return;
         }
         if (!response) {
@@ -104,7 +105,7 @@ function callNativeHost(action, payload) {
         resolve(response);
       });
     } catch (error) {
-      reject(new Error(formatNativeHostError(error && error.message)));
+      Promise.resolve(formatNativeHostError(error && error.message)).then(msg => reject(new Error(msg)));
     }
   });
 }
@@ -121,10 +122,18 @@ function portFromBackendUrl(value) {
   return 18789;
 }
 
-function formatNativeHostError(message) {
+async function formatNativeHostError(message) {
   const text = String(message || "Native messaging failed.");
   const id = chrome.runtime.id || "<extension-id>";
+  let os = "";
+  try { ({ os } = await chrome.runtime.getPlatformInfo()); } catch {}
   if (/Specified native messaging host not found|not registered|host not found/i.test(text)) {
+    if (os === "linux") {
+      return "로컬 더빙 서버(127.0.0.1:18789)에 연결하지 못했습니다. 터미널에서 systemctl --user restart youtube-live-dub.service 를 실행해 주세요.";
+    }
+    if (os === "mac") {
+      return "로컬 더빙 서버(127.0.0.1:18789)가 꺼져 있습니다. 프로젝트 폴더에서 start-macos.command 를 실행해 주세요.";
+    }
     return `Native host "${NATIVE_HOST_NAME}" is not installed. From PowerShell run: cd "$env:USERPROFILE\\youtube-live-dub-mvp\\native-host"; .\\install-native-host.ps1 -ExtensionId "${id}"; then restart Chrome.`;
   }
   if (/Access to the specified native messaging host is forbidden|forbidden/i.test(text)) {
@@ -160,7 +169,11 @@ async function prepareDub(payload, sender) {
         const line = pending.slice(0,newline); pending=pending.slice(newline+1);
         if (!line) continue;
         const event = JSON.parse(line);
-        if (event.type === 'error') throw new Error(event.error || 'Speech preparation failed.');
+        if (event.type === 'error') {
+          const err = new Error(event.error || 'Speech preparation failed.');
+          if (typeof event.retryable === 'boolean') err.retryable = event.retryable;
+          throw err;
+        }
         if (event.type === 'done') result=event.result;
         if (event.type === 'segment') await chrome.tabs.sendMessage(sender.tab.id, {
           type:'YLD_PREPARE_PROGRESS', requestId:payload.requestId, item:event.item,
@@ -187,7 +200,9 @@ async function prepareDub(payload, sender) {
       json && (json.error || json.message)
         ? json.error || json.message
         : `Backend request failed with HTTP ${response.status}`;
-    throw new Error(message);
+    const error = new Error(message);
+    if (typeof json?.retryable === "boolean") error.retryable = json.retryable;
+    throw error;
   }
 
   return json || {};

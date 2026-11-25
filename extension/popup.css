@@ -1,9 +1,14 @@
+:root {
+  color-scheme: dark;
+}
+
 body {
-  width: 280px;
-  margin: 0;
-  background: #15171c;
+  min-width: 304px;
+  max-width: 360px;
+  margin: 0 auto;
+  background: #14171e;
   color: #f4f7fb;
-  font: 12px/1.4 Arial, Helvetica, sans-serif;
+  font: 12.5px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 button,
@@ -14,7 +19,7 @@ button,
 .popup {
   display: grid;
   gap: 12px;
-  padding: 12px;
+  padding: 14px;
 }
 
 .popup-header {
@@ -30,19 +35,21 @@ p {
 }
 
 h1 {
-  font-size: 14px;
+  font-size: 15px;
+  letter-spacing: -0.2px;
 }
 
 p {
   color: #9bd5ff;
+  font-size: 11.5px;
   font-weight: 700;
 }
 
 .status-chip {
-  min-width: 74px;
-  padding: 4px 7px;
+  min-width: 72px;
+  padding: 4px 8px;
   border-radius: 999px;
-  background: #20242d;
+  background: #222733;
   color: #9bd5ff;
   text-align: center;
   font-size: 11px;
@@ -50,11 +57,12 @@ p {
 }
 
 .status-chip.error {
-  background: #4b2024;
+  background: #522026;
   color: #ffd8d8;
 }
 
-.actions {
+.actions,
+.sub-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
@@ -65,26 +73,33 @@ p {
 }
 
 button {
-  min-height: 32px;
+  min-height: 34px;
+  padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 6px;
-  background: #20242d;
+  border-radius: 7px;
+  background: #202530;
   color: #f4f7fb;
   cursor: pointer;
   font: inherit;
   font-weight: 700;
 }
 
-button:hover {
-  background: #2b313c;
+button:hover:not(:disabled) {
+  background: #2b3240;
+}
+
+button:focus-visible {
+  outline: 2px solid #9bd5ff;
+  outline-offset: 2px;
 }
 
 button.primary {
   border-color: #2f8cff;
   background: #1769d1;
+  color: #ffffff;
 }
 
-button.primary:hover {
+button.primary:hover:not(:disabled) {
   background: #247be8;
 }
 
@@ -94,12 +109,26 @@ button:disabled {
 }
 
 .details {
-  min-height: 56px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #cdd6e1;
+  min-height: 58px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: #d2dbe6;
   overflow-wrap: anywhere;
 }
-.media-actions { display:grid; gap:8px; border-top:1px solid #444; padding-top:12px; }
-[data-videos] { display:grid; gap:6px; overflow-wrap:anywhere; color:#cdd6e1; }
+
+.media-actions {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  padding-top: 12px;
+}
+
+[data-videos] {
+  display: grid;
+  gap: 6px;
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+  color: #c5d0de;
+}

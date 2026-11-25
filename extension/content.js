@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.9.1";
+  const BUILD_VERSION = "0.9.2";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -18,6 +18,9 @@
   const MIN_START_BUFFER_SECONDS = 12;
   const MIN_START_BUFFER_CLIPS = 1;
   const SEEK_BUFFER_CLIPS = 2;
+  const PREPARE_RETRY_DELAY_MS = 1500;
+  const PREPARE_ATTEMPTS_PER_CLIP = 2;
+  const MAX_CONSECUTIVE_PREPARE_FAILURES = 6;
   const TEXT_TRACK_WAIT_MS = 4500;
   const CAPTION_FETCH_BUDGET_MS = 3500;
   const PAGE_CAPTION_PRIME_WAIT_MS = 7500;
@@ -66,6 +69,10 @@
     chunks: [],
     prepared: [],
     preparedChunkIndexes: new Set(),
+    skippedChunkIndexes: new Set(),
+    chunkPrepareFailures: new Map(),
+    consecutivePrepareFailures: 0,
+    prepareRetryAt: 0,
     preparingChunks: false,
     currentAudio: null,
     testAudio: null,
@@ -123,12 +130,13 @@
     panel.id = PANEL_ID;
     panel.hidden = !getSavedPanelVisible();
     panel.innerHTML = `
-      <div class="yld-header">
-        <div class="yld-title">Live Dub MVP <span class="yld-version">v${BUILD_VERSION}</span></div>
+      <div class="yld-header" data-yld-header>
+        <div class="yld-title">Live Dub <span class="yld-version">v${BUILD_VERSION}</span></div>
         <div class="yld-header-actions">
           <div class="yld-status" data-yld-status>idle</div>
           <button class="yld-panel-button yld-settings-toggle" type="button" data-yld-settings-toggle aria-expanded="false" aria-controls="yld-settings">설정</button>
-          <button class="yld-icon-button" type="button" title="Hide panel" aria-label="Hide panel" data-yld-hide>×</button>
+          <button class="yld-icon-button" type="button" title="패널 접기 / 펼치기" aria-label="패널 접기 또는 펼치기" data-yld-collapse>−</button>
+          <button class="yld-icon-button" type="button" title="패널 숨기기" aria-label="Hide panel" data-yld-hide>×</button>
         </div>
       </div>
       <div class="yld-body">
@@ -137,8 +145,8 @@
           <fieldset class="yld-modes"><legend>번역 · 음성 조합</legend>
             <label><input type="radio" name="yld-mode" value="local"><span><b>1. 모두 로컬</b><small>Gemma 4 번역 → Supertonic 3 음성</small></span></label>
             <label><input type="radio" name="yld-mode" value="gemma-gpt"><span><b>2. 로컬 번역 · GPT 음성</b><small>Gemma 4 → GPT Realtime 음성</small></span></label>
-            <label><input type="radio" name="yld-mode" value="gpt-local"><span><b>3. GPT 번역 · 로컬 음성</b><small>GPT → Supertonic 3 음성</small></span></label>
-            <label><input type="radio" name="yld-mode" value="gpt"><span><b>4. 번역·음성 모두 GPT</b><small>GPT → GPT Realtime 음성</small></span></label>
+            <label><input type="radio" name="yld-mode" value="gpt-local"><span><b>3. GPT 번역 · 로컬 음성</b><small>GPT-6.2 Sol → Supertonic 3 음성</small></span></label>
+            <label><input type="radio" name="yld-mode" value="gpt"><span><b>4. 번역·음성 모두 GPT</b><small>GPT-6.2 Sol → GPT Realtime 음성</small></span></label>
           </fieldset>
           <p class="yld-mode-note" data-yld-mode-note></p>
 
@@ -150,7 +158,7 @@
 
         <div class="yld-row">
           <label class="yld-label" for="yld-volume">
-            Original volume
+            원음 음량
             <span data-yld-volume-label>${DEFAULT_ORIGINAL_VOLUME}%</span>
           </label>
           <input id="yld-volume" class="yld-panel-range" type="range" min="0" max="100" step="1" value="${DEFAULT_ORIGINAL_VOLUME}" data-yld-volume>
@@ -158,7 +166,7 @@
 
         <div class="yld-row-inline">
           <label class="yld-row">
-            <span class="yld-label">Voice</span>
+            <span class="yld-label">음색</span>
             <select class="yld-panel-select" data-yld-voice>
               <option value="763d5f200a9f5808056733">Low male</option>
               <option value="8590d2b8884926372c6b4f">High male</option>
@@ -167,11 +175,11 @@
             </select>
           </label>
           <label class="yld-row">
-            <span class="yld-label">Target</span>
+            <span class="yld-label">목표 언어</span>
             <select class="yld-panel-select" data-yld-lang>
-              <option value="ko">Korean</option>
-              <option value="en">English</option>
-              <option value="ja">Japanese</option>
+              <option value="ko">한국어</option>
+              <option value="en">영어</option>
+              <option value="ja">일본어</option>
             </select>
           </label>
         </div>
@@ -179,11 +187,33 @@
         <section id="yld-settings" class="yld-advanced-settings" hidden>
           <p class="yld-mode-note">원문은 유튜브 자막 또는 이 PC의 음성 인식으로 준비해요. 위 선택은 번역과 음성 출력에 적용돼요.</p>
           <p class="yld-mode-note" data-yld-shortcuts aria-live="polite">단축키 확인 중…</p>
-          <button class="yld-panel-button" type="button" data-yld-shortcuts-edit>단축키 변경</button>
-          <button class="yld-panel-button" type="button" data-yld-api-settings>API 키 설정 · 연결 테스트</button>
+          <div class="yld-row-inline">
+            <button class="yld-panel-button" type="button" data-yld-shortcuts-edit>단축키 변경</button>
+            <button class="yld-panel-button" type="button" data-yld-api-settings>API 키 · 연결 테스트</button>
+          </div>
+          <div class="yld-row-inline" data-yld-gpt-fields hidden>
+            <label class="yld-row">
+              <span class="yld-label">GPT 번역 모델</span>
+              <select class="yld-panel-select" data-yld-openai-model>
+                <option value="gpt-6.2-sol">GPT-6.2 Sol · 추천</option>
+                <option value="gpt-6.2-astra">GPT-6.2 Astra</option>
+                <option value="gpt-6.1-sol">GPT-6.1 Sol</option>
+                <option value="gpt-6.1-terra">GPT-6.1 Terra</option>
+                <option value="gpt-6-luna">GPT-6 Luna</option>
+              </select>
+            </label>
+            <label class="yld-row">
+              <span class="yld-label">GPT 응답 속도</span>
+              <select class="yld-panel-select" data-yld-openai-tier>
+                <option value="">기본 · Standard</option>
+                <option value="fast">Fast · 빠름</option>
+                <option value="ultrafast">Ultrafast · 초고속</option>
+              </select>
+            </label>
+          </div>
         <div class="yld-row">
           <label class="yld-label" for="yld-backend">
-            Backend
+            로컬 서버 주소
           </label>
           <div class="yld-row-inline yld-backend-grid">
             <input id="yld-backend" class="yld-panel-input" type="text" value="${DEFAULT_BACKEND_URL}" data-yld-backend>
@@ -191,7 +221,7 @@
           </div>
         </div>
 
-        <div class="yld-row">
+        <div class="yld-row" hidden>
           <label class="yld-label" for="yld-tts-provider">음성 엔진</label>
           <select id="yld-tts-provider" class="yld-panel-select" data-yld-tts-provider>
             <option value="openai-realtime">GPT Realtime · API 음성 · 1배</option><option value="supertonic3">Supertonic 3 · 로컬 음성 · 1.15배</option>
@@ -199,7 +229,7 @@
             <option value="supertone">Supertone API</option>
           </select>
         </div>
-        <div class="yld-row">
+        <div class="yld-row" data-yld-supertone-fields hidden>
           <label class="yld-label" for="yld-model">음성 모델</label>
           <select id="yld-model" class="yld-panel-select" data-yld-model>
             <option value="sona_speech_2">Sona speech 2</option>
@@ -207,17 +237,16 @@
             <option value="sona_speech_1">Sona speech 1</option>
             <option value="supertonic_api_1">Supertonic API 1</option>
           </select>
-        </div>
-
-        <div class="yld-row-inline">
-          <label class="yld-row">
-            <span class="yld-label">Pitch</span>
-            <input class="yld-panel-input" type="number" min="-24" max="24" step="1" value="0" data-yld-pitch>
-          </label>
-          <label class="yld-row">
-            <span class="yld-label">Variance</span>
-            <input class="yld-panel-input" type="number" min="0" max="2" step="0.1" value="1.5" data-yld-variance>
-          </label>
+          <div class="yld-row-inline">
+            <label class="yld-row">
+              <span class="yld-label">Pitch</span>
+              <input class="yld-panel-input" type="number" min="-24" max="24" step="1" value="0" data-yld-pitch>
+            </label>
+            <label class="yld-row">
+              <span class="yld-label">Variance</span>
+              <input class="yld-panel-input" type="number" min="0" max="2" step="0.1" value="1.5" data-yld-variance>
+            </label>
+          </div>
         </div>
 
         <div class="yld-row">
@@ -253,6 +282,8 @@
     els.stop = panel.querySelector("[data-yld-stop]");
     els.test = panel.querySelector("[data-yld-test]");
     els.hide = panel.querySelector("[data-yld-hide]");
+    els.collapse = panel.querySelector("[data-yld-collapse]");
+    els.header = panel.querySelector("[data-yld-header]");
     els.backend = panel.querySelector("[data-yld-backend]");
     els.backend.value = getSavedBackendUrl();
     els.volume = panel.querySelector("[data-yld-volume]");
@@ -261,6 +292,14 @@
     els.lang = panel.querySelector("[data-yld-lang]");
     els.model = panel.querySelector("[data-yld-model]");
     els.ttsProvider = panel.querySelector("[data-yld-tts-provider]");
+    els.openaiModel = panel.querySelector("[data-yld-openai-model]");
+    els.openaiTier = panel.querySelector("[data-yld-openai-tier]");
+    try {
+      const savedModel = localStorage.getItem("yld-openai-model");
+      if (savedModel && [...els.openaiModel.options].some(o => o.value === savedModel)) els.openaiModel.value = savedModel;
+      const savedTier = localStorage.getItem("yld-openai-tier");
+      if (savedTier !== null && [...els.openaiTier.options].some(o => o.value === savedTier)) els.openaiTier.value = savedTier;
+    } catch {}
     els.pitch = panel.querySelector("[data-yld-pitch]");
     els.variance = panel.querySelector("[data-yld-variance]");
     els.speed = panel.querySelector("[data-yld-speed]");
@@ -278,7 +317,7 @@
     els.panel.dataset.yldBound = "1";
     const cloudVoices = els.voice.innerHTML;
     const modelOptions = els.model.innerHTML;
-    const modes = { local: ['supertonic3', 'Gemma 4 → Supertonic 3'], 'gemma-gpt': ['openai-realtime', 'Gemma 4 → GPT 음성'], 'gpt-local': ['supertonic3', 'GPT 번역 → Supertonic 3'], gpt: ['openai-realtime', 'GPT 번역 → GPT 음성'] };
+    const modes = { local: ['supertonic3', 'Gemma 4 → Supertonic 3'], 'gemma-gpt': ['openai-realtime', 'Gemma 4 → GPT 음성'], 'gpt-local': ['supertonic3', 'GPT-6.2 Sol → Supertonic 3'], gpt: ['openai-realtime', 'GPT-6.2 Sol → GPT 음성'] };
     let selectedMode = 'local';
     try { const saved = localStorage.getItem('yld-dubbing-mode'); if (Object.hasOwn(modes, saved)) selectedMode = saved; } catch {}
     if (Object.hasOwn(modes, state.recoveryResume?.mode)) selectedMode = state.recoveryResume.mode;
@@ -288,6 +327,7 @@
     let previousSpeechProvider = "supertone";
     const updateSpeechControls = () => {
       const provider = els.ttsProvider.value;
+      const mode = els.panel.dataset.mode || 'local';
       savedVoices[previousSpeechProvider] = els.voice.value;
       els.voice.innerHTML = provider === "supertonic3"
         ? '<option value="auto">자동 · 원본 음색에 맞춤</option>' + ["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"].map(voice => `<option value="${voice}">${voice} · ${voice[0] === "M" ? "남성" : "여성"}</option>`).join("")
@@ -298,22 +338,74 @@
       previousSpeechProvider = provider;
       els.voice.disabled = provider === "windows-sapi";
       [els.model, els.pitch, els.variance].forEach(control => { control.disabled = provider !== "supertone"; });
+      const supertoneBox = els.panel.querySelector('[data-yld-supertone-fields]');
+      if (supertoneBox) supertoneBox.hidden = provider !== "supertone";
+      const gptBox = els.panel.querySelector('[data-yld-gpt-fields]');
+      if (gptBox) gptBox.hidden = !['gpt-local', 'gpt'].includes(mode);
       els.model.innerHTML = provider === 'openai-realtime' ? '<option>gpt-realtime-2.1-mini</option>' : provider === 'supertonic3' ? '<option>supertonic-3</option>' : modelOptions;
       els.speed.disabled = false;
     };
     els.ttsProvider.addEventListener("change", updateSpeechControls);
+    const updateSummaryLabel = () => {
+      const mode = els.panel.dataset.mode || 'local';
+      const gptName = (els.openaiModel?.value || 'gpt-6.2-sol').replace(/^gpt-/i, 'GPT-').replace(/-(sol|astra|terra|luna)$/i, (_, n) => ` ${n[0].toUpperCase()}${n.slice(1)}`);
+      els.panel.querySelector('[data-yld-mode-summary]').textContent = mode === 'gpt-local'
+        ? `${gptName} → Supertonic 3`
+        : mode === 'gpt' ? `${gptName} → GPT 음성` : modes[mode][1];
+    };
     function applyMode(mode) {
       if (!Object.hasOwn(modes, mode)) return;
       if (mode !== els.panel.dataset.mode || state.running || state.currentAudio) stopDub({ resumeVideo: false });
       els.panel.dataset.mode = mode;
       els.ttsProvider.value = modes[mode][0];
       els.panel.querySelector(`[name="yld-mode"][value="${mode}"]`).checked = true;
-      els.panel.querySelector('[data-yld-mode-summary]').textContent = modes[mode][1];
+      updateSummaryLabel();
       els.panel.querySelector('[data-yld-mode-note]').textContent = mode === 'local'
         ? '번역·음성 모두 이 PC에서 처리해요. 외부 AI API 요금이 없어요.'
         : '선택한 단계의 텍스트를 OpenAI로 전송해요. API 사용량에 따라 과금돼요. 연결된 키가 필요해요.';
       try { localStorage.setItem('yld-dubbing-mode', mode); } catch {}
       updateSpeechControls();
+    }
+    els.openaiModel?.addEventListener('change', () => {
+      try { localStorage.setItem('yld-openai-model', els.openaiModel.value); } catch {}
+      updateSummaryLabel();
+    });
+    els.openaiTier?.addEventListener('change', () => {
+      try { localStorage.setItem('yld-openai-tier', els.openaiTier.value); } catch {}
+    });
+    els.collapse?.addEventListener('click', () => {
+      const collapsed = els.panel.classList.toggle('yld-collapsed');
+      els.collapse.textContent = collapsed ? '+' : '−';
+    });
+    if (els.header) {
+      let drag = null;
+      const clampPanel = (left, top) => {
+        const rect = els.panel.getBoundingClientRect();
+        const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+        els.panel.style.right = 'auto';
+        els.panel.style.left = `${Math.min(maxLeft, Math.max(8, left))}px`;
+        els.panel.style.top = `${Math.min(maxTop, Math.max(8, top))}px`;
+      };
+      els.header.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || event.target.closest('button')) return;
+        const rect = els.panel.getBoundingClientRect();
+        drag = { dx: event.clientX - rect.left, dy: event.clientY - rect.top, id: event.pointerId };
+        els.header.setPointerCapture?.(event.pointerId);
+      });
+      els.header.addEventListener('pointermove', event => {
+        if (!drag || event.pointerId !== drag.id) return;
+        clampPanel(event.clientX - drag.dx, event.clientY - drag.dy);
+      });
+      const endDrag = event => { if (drag && event.pointerId === drag.id) drag = null; };
+      els.header.addEventListener('pointerup', endDrag);
+      els.header.addEventListener('pointercancel', endDrag);
+      window.addEventListener('resize', () => {
+        if (els.panel.style.left) {
+          const rect = els.panel.getBoundingClientRect();
+          clampPanel(rect.left, rect.top);
+        }
+      });
     }
     const toggle = els.panel.querySelector('[data-yld-settings-toggle]');
     toggle.addEventListener('click', () => {
@@ -466,7 +558,7 @@
     state.playbackHold = null;
     state.lastSyncVideoTime = null;
     state.transcriptWindows = [];
-    state.metrics = { startedAt: Date.now(), firstAudioMs: null, bufferWaits: 0, bufferWaitMs: 0, tailWaits: 0, lastPrepareMs: 0, playedClips: 0 };
+    state.metrics = { startedAt: Date.now(), firstAudioMs: null, bufferWaits: 0, bufferWaitMs: 0, tailWaits: 0, lastPrepareMs: 0, playedClips: 0, fallbackClips: 0, skippedClips: 0 };
     stopTestAudio();
     state.lastError = "";
     els.start.disabled = true;
@@ -501,6 +593,7 @@
       state.chunks = chunkSegments(segments);
       state.prepared = [];
       state.preparedChunkIndexes = new Set();
+      resetClipRecovery();
       updateMeta(
         state.videoId,
         `${segments.length} segments, ${state.chunks.length} chunks`,
@@ -654,6 +747,7 @@
     if (shouldResume && state.video) state.video.play().catch(() => {});
     state.prepared = [];
     state.preparedChunkIndexes = new Set();
+    resetClipRecovery();
     state.preparingChunks = false;
     state.currentChunkIndex = -1;
     revokeObjectUrls();
@@ -724,6 +818,9 @@
     if (jumped) {
       stopCurrentAudio();
       if (state.playbackHold) state.playbackHold.reason = 'buffer';
+      // A seek gives skipped clips a fresh chance; the consecutive-failure limit still applies.
+      state.skippedChunkIndexes.clear();
+      state.chunkPrepareFailures.clear();
     }
     maybePrepareMoreAudio(videoTime, "sync");
 
@@ -731,7 +828,7 @@
       const speechRemaining = state.currentAudio && !state.currentAudio.ended &&
         state.currentAudio.duration - state.currentAudio.currentTime > 0.08;
       const currentReady = state.prepared.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
-      const noCaptionNow = !state.chunks.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+      const noCaptionNow = !hasDubbedCaptionAt(videoTime);
       const enoughAudio = currentReady && (hasStartBufferReady(videoTime) || !selectUnpreparedChunksForWindow(state.chunks, videoTime).length);
       const naturalGapReady = noCaptionNow && (isTranscriptKnownAt(videoTime) || (!state.transcriptWindows.length && !state.transcriptExpanding));
       if (!speechRemaining && (enoughAudio || naturalGapReady || (state.playbackHold.reason === 'tail' && noCaptionNow))) {
@@ -761,7 +858,7 @@
     const previousItem = state.prepared.find(item => item.chunkIndex === state.currentChunkIndex);
     const previousStillSpeaking = previousItem && state.currentAudio && !state.currentAudio.ended &&
       state.currentAudio.duration - state.currentAudio.currentTime > 0.08;
-    const expectedCaption = state.chunks.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+    const expectedCaption = hasDubbedCaptionAt(videoTime);
     if (!jumped && previousStillSpeaking && nextItem?.chunkIndex !== state.currentChunkIndex) {
       if (expectedCaption) holdPlayback(chunkIndex === -1 ? 'buffer' : 'tail');
       return;
@@ -875,7 +972,7 @@
     maybeExpandTranscriptCoverage(videoTime);
     if (state.captureProcessing || !state.chunks.length) return;
 
-    if (state.preparingChunks) {
+    if (state.preparingChunks || Date.now() < state.prepareRetryAt) {
       return;
     }
 
@@ -891,11 +988,22 @@
     }
 
     const currentChunk = state.chunks.find((chunk) => chunk.end > videoTime);
-    const needsCurrentAudio = currentChunk && !state.preparedChunkIndexes.has(currentChunk.index);
+    const needsCurrentAudio = currentChunk && !isChunkCovered(currentChunk.index);
     const requestedChunks = needsCurrentAudio ? nextChunks.slice(0, SEEK_BUFFER_CLIPS) : nextChunks;
     const sessionId = state.sessionId;
     prepareAndAppendChunks(requestedChunks).catch((error) => {
       if (!isActiveSession(sessionId)) return;
+      const recovery = recoverFailedClip(requestedChunks, error);
+      if (recovery) {
+        console.warn(`[YouTube Live Dub MVP] Clip prepare failed; ${recovery === "skip" ? "playing original audio" : "retrying"}.`, error);
+        setStatus(recovery === "skip" ? "ready" : "buffering");
+        updateMeta(
+          state.videoId || "unknown",
+          `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
+          formatAudioState(recovery === "skip" ? `clip left to original audio (${reason})` : `retrying clip (${reason})`, videoTime)
+        );
+        return;
+      }
       console.error("[YouTube Live Dub MVP] Rolling buffer failed.", error);
       state.lastError = error.message || String(error);
       setStatus("error");
@@ -912,10 +1020,47 @@
     return state.running && state.sessionId === sessionId;
   }
 
+  function resetClipRecovery() {
+    state.skippedChunkIndexes = new Set();
+    state.chunkPrepareFailures = new Map();
+    state.consecutivePrepareFailures = 0;
+    state.prepareRetryAt = 0;
+  }
+
+  function isChunkCovered(index) {
+    return state.preparedChunkIndexes.has(index) || state.skippedChunkIndexes.has(index);
+  }
+
+  function captionChunkAt(videoTime, skipped) {
+    return state.chunks.some(item => state.skippedChunkIndexes.has(item.index) === skipped &&
+      videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+  }
+
+  // Clips left to the original audio count as caption gaps, so playback never waits for them.
+  function hasDubbedCaptionAt(videoTime) { return captionChunkAt(videoTime, false); }
+  function isSkippedClipAt(videoTime) { return captionChunkAt(videoTime, true); }
+
+  // One failed clip should not end the whole dub: retry it once, then leave it to the original
+  // audio and move on. Errors the user must fix, or a lasting outage, still stop the dub.
+  function recoverFailedClip(chunks, error) {
+    if (error?.retryable === false) return "";
+    state.consecutivePrepareFailures++;
+    if (state.consecutivePrepareFailures > MAX_CONSECUTIVE_PREPARE_FAILURES) return "";
+    const chunk = chunks.find(item => !isChunkCovered(item.index));
+    if (!chunk) return "";
+    const attempts = (state.chunkPrepareFailures.get(chunk.index) || 0) + 1;
+    state.chunkPrepareFailures.set(chunk.index, attempts);
+    state.prepareRetryAt = Date.now() + PREPARE_RETRY_DELAY_MS;
+    if (attempts < PREPARE_ATTEMPTS_PER_CLIP) return "retry";
+    state.skippedChunkIndexes.add(chunk.index);
+    if (state.metrics) state.metrics.skippedClips++;
+    return "skip";
+  }
+
   async function prepareAndAppendChunks(chunks) {
     const sessionId = state.sessionId;
     const pending = chunks
-      .filter((chunk) => !state.preparedChunkIndexes.has(chunk.index))
+      .filter((chunk) => !isChunkCovered(chunk.index))
       .slice(0, state.bufferedAudioSource ? (state.startupPreparing ? 3 : 2) : MAX_PREPARE_CHUNKS);
 
     if (!pending.length) {
@@ -946,9 +1091,14 @@
         if (!isActiveSession(sessionId)) { partial.forEach(entry=>entry.audio?.pause()); return; }
         for (const entry of partial) {
           if (!state.chunks.some(chunk=>chunk.index===entry.chunkIndex) || state.preparedChunkIndexes.has(entry.chunkIndex)) continue;
-          state.preparedChunkIndexes.add(entry.chunkIndex); state.prepared.push(entry);
+          state.preparedChunkIndexes.add(entry.chunkIndex);
+          state.chunkPrepareFailures.delete(entry.chunkIndex);
+          state.consecutivePrepareFailures = 0;
+          if (entry.fallback && state.metrics) state.metrics.fallbackClips++;
+          state.prepared.push(entry);
         }
         state.prepared.sort((a,b)=>a.start-b.start);
+        renderAlert();
       } : undefined);
       if (!isActiveSession(sessionId)) return 0;
       if (state.metrics) state.metrics.lastPrepareMs = Date.now() - prepareStarted;
@@ -970,7 +1120,10 @@
       prepared.filter(item => !validPrepared.includes(item)).forEach(item => item.audio?.pause());
       validPrepared.forEach((item) => {
         state.preparedChunkIndexes.add(item.chunkIndex);
+        state.chunkPrepareFailures.delete(item.chunkIndex);
       });
+      state.consecutivePrepareFailures = 0;
+      if (state.metrics) state.metrics.fallbackClips += validPrepared.filter(item => item.fallback).length;
       state.prepared = state.prepared
         .concat(validPrepared)
         .sort((a, b) => a.start - b.start);
@@ -1243,7 +1396,11 @@
       const response = await sendRuntimeMessage({type:"YLD_PREPARE_DUB",payload:{...payload,stream:Boolean(onSegment),requestId}});
       await progress;
       if (progressError) throw progressError;
-      if (!response?.ok) throw new Error(response?.error || "Backend request failed.");
+      if (!response?.ok) {
+        const error = new Error(response?.error || "Backend request failed.");
+        if (typeof response?.retryable === "boolean") error.retryable = response.retryable;
+        throw error;
+      }
       return response.payload || {};
     } finally { prepareProgress.delete(requestId); }
   }
@@ -2535,6 +2692,7 @@
     if (!validIndexes.has(state.currentChunkIndex)) stopCurrentAudio();
     state.prepared = state.prepared.filter(item => validIndexes.has(item.chunkIndex));
     state.preparedChunkIndexes = new Set(state.prepared.map(item => item.chunkIndex));
+    state.skippedChunkIndexes = new Set([...state.skippedChunkIndexes].filter(index => validIndexes.has(index)));
     const nextLastEnd = getLastSegmentEnd(merged);
     state.transcriptTargetDuration = Math.max(state.transcriptTargetDuration, nextLastEnd);
     updateMeta(
@@ -2960,7 +3118,7 @@
 
   function selectUnpreparedChunksForWindow(chunks, currentTime) {
     return selectChunksForWindow(chunks, currentTime)
-      .filter((chunk) => !state.preparedChunkIndexes.has(chunk.index))
+      .filter((chunk) => !isChunkCovered(chunk.index))
       .slice(0, state.bufferedAudioSource ? (state.startupPreparing ? 3 : 2) : MAX_PREPARE_CHUNKS);
   }
 
@@ -2968,7 +3126,7 @@
     const safeTime = Number.isFinite(videoTime) ? videoTime : getVideoTime();
     const bufferInfo = getBufferInfo(safeTime);
     const nextChunk = state.chunks.find((chunk) => {
-      return !state.preparedChunkIndexes.has(chunk.index) && chunk.end >= safeTime;
+      return !isChunkCovered(chunk.index) && chunk.end >= safeTime;
     });
     const nextText = nextChunk
       ? `next ${nextChunk.index + 1}@${formatTime(nextChunk.start)}`
@@ -2998,7 +3156,7 @@
     for (const chunk of state.chunks) {
       if (chunk.end <= videoTime) continue;
       if (chunk.start >= coverageEnd) break;
-      if (!state.preparedChunkIndexes.has(chunk.index)) break;
+      if (!isChunkCovered(chunk.index)) break;
       preparedEnd = Math.max(preparedEnd, Math.min(chunk.end, coverageEnd));
     }
     return preparedEnd;
@@ -3069,6 +3227,7 @@
           voiceId: item.voiceId || "",
           speaker: item.speaker || null,
           speechSpeed: Number(item.speechSpeed || 1),
+          fallback: item.fallback || null,
           audio: null,
         };
       })
@@ -3393,6 +3552,8 @@
   function dubbingSettingsFromControls() {
     return {
       mode: els.panel.dataset.mode || "local",
+      openaiModel: els.openaiModel?.value || "gpt-6.2-sol",
+      openaiServiceTier: els.openaiTier?.value || "",
       voice: els.voice.value,
       tone: "neutral",
       targetLang: els.lang.value,
@@ -3452,8 +3613,10 @@
       return;
     }
 
-    const volumePercent = Math.max(0, Math.min(100, Number(els.volume.value) || 0));
-    const muted = volumePercent === 0;
+    // A clip left to the original audio plays at the volume the viewer had before dubbing.
+    const originalNow = state.running && state.originalVideoVolume !== null && isSkippedClipAt(getVideoTime());
+    const volumePercent = originalNow ? Math.round(state.originalVideoVolume * 100) : Math.max(0, Math.min(100, Number(els.volume.value) || 0));
+    const muted = originalNow ? Boolean(state.originalMuted) : volumePercent === 0;
 
     state.video.volume = volumePercent / 100;
     state.video.muted = muted;
@@ -3483,11 +3646,6 @@
       <div><strong>Video:</strong> ${escapeHtml(video || "unknown")}</div>
       <div><strong>Captions:</strong> ${escapeHtml(captions || "not loaded")}</div>
       <div><strong>Audio:</strong> ${escapeHtml(audio || "none")}</div>
-      ${
-        state.lastError
-          ? `<div class="yld-error"><strong>Error:</strong> ${escapeHtml(state.lastError)}</div>`
-          : ""
-      }
     `;
     renderAlert();
   }
@@ -3516,6 +3674,8 @@
       item?.voiceId ? `음색: ${item.voiceId}${item.speaker ? ' · ' + ({male:'남성 음색',female:'여성 음색',unknown:'기본 음색 (판별 불가)'}[item.speaker.label] || '기본 음색') : ''}` : "",
       item?.sourceText ? `원문: ${item.sourceText}` : "",
       item?.translatedText ? `번역: ${item.translatedText}` : "",
+      state.metrics?.fallbackClips || state.metrics?.skippedClips ? `대체 재생: 로컬 엔진 ${state.metrics.fallbackClips}개 · 원음 ${state.metrics.skippedClips}개` : "",
+      item?.fallback ? `대체 사유: ${item.fallback.voice || item.fallback.translation}` : "",
       state.playbackHold ? (state.playbackHold.reason === 'tail' ? '문장을 끝까지 읽은 뒤 영상 재개' : '더빙 준비 후 영상과 함께 재개') : "",
     ].filter(Boolean).join("\n");
   }
@@ -3526,13 +3686,26 @@
     }
 
     if (!state.lastError) {
-      els.alert.hidden = true;
-      els.alert.textContent = "";
+      const notice = degradedNotice();
+      els.alert.hidden = !notice;
+      els.alert.classList?.toggle("yld-notice", Boolean(notice));
+      els.alert.textContent = notice;
       return;
     }
 
+    els.alert.classList?.remove("yld-notice");
     els.alert.hidden = false;
     els.alert.textContent = state.connectionLost ? state.lastError : `Error: ${state.lastError}`;
+  }
+
+  // Fallback and skipped clips are not errors, but the viewer should know the voice changed.
+  function degradedNotice() {
+    const metrics = state.running ? state.metrics : null;
+    const parts = [
+      metrics?.fallbackClips ? `로컬 엔진 ${metrics.fallbackClips}개` : "",
+      metrics?.skippedClips ? `원음 ${metrics.skippedClips}개` : "",
+    ].filter(Boolean);
+    return parts.length ? `OpenAI 연결이 불안정해 일부 구간을 대신 재생했어요 (${parts.join(" · ")}).` : "";
   }
 
   function cleanCaptionText(text) {

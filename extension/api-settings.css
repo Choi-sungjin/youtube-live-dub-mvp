@@ -1,19 +1,141 @@
-:root { color-scheme: dark; font-family: system-ui, sans-serif; }
-body { width: 360px; margin: 0; color: #e9eef7; background: #151920; }
-main { padding: 20px; }
-header { display: flex; justify-content: space-between; align-items: center; }
-h1 { font-size: 19px; margin: 0; }
-p { line-height: 1.55; font-size: 13px; }
-.intro, .hint { color: #aeb9cb; }
-.hint { font-size: 12px; }
-label { display: block; font-size: 13px; margin: 16px 0 8px; }
-input { box-sizing: border-box; width: 100%; background: #222a36; border: 1px solid #536077; border-radius: 7px; color: white; padding: 11px; }
-button { cursor: pointer; border: 1px solid #536077; border-radius: 7px; background: #263346; color: white; padding: 9px 12px; font-weight: 600; }
-button:disabled { opacity: .5; cursor: wait; }
-#save, #test { background: #2967c4; border-color: #397be0; }
-#close { padding: 3px 9px; background: transparent; }
-.buttons { display: flex; gap: 8px; }
-section { border-top: 1px solid #364153; margin-top: 20px; padding-top: 18px; }
-#result { white-space: pre-wrap; overflow-wrap: anywhere; }
-#result.error { color: #ffb6af; }
-audio { width: 100%; margin-top: 8px; }
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  min-width: 340px;
+  max-width: 400px;
+  margin: 0 auto;
+  color: #e9eef7;
+  background: #151920;
+}
+
+main {
+  padding: 20px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+p {
+  line-height: 1.55;
+  font-size: 13px;
+  margin: 10px 0;
+}
+
+.intro,
+.hint {
+  color: #aeb9cb;
+}
+
+.hint {
+  font-size: 12px;
+}
+
+#key-status {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #1e2531;
+  border: 1px solid #364153;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #9bd5ff;
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  background: #222a36;
+  border: 1px solid #536077;
+  border-radius: 7px;
+  color: #ffffff;
+  padding: 10px 11px;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid #536077;
+  border-radius: 7px;
+  background: #263346;
+  color: #ffffff;
+  padding: 9px 13px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+button:hover:not(:disabled) {
+  background: #31425b;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #9bd5ff;
+  outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+#save,
+#test {
+  background: #1d64c8;
+  border-color: #397be0;
+}
+
+#save:hover:not(:disabled),
+#test:hover:not(:disabled) {
+  background: #2875e2;
+}
+
+#close {
+  padding: 4px 9px;
+  background: transparent;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+section {
+  border-top: 1px solid #364153;
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+#result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #9be6b4;
+}
+
+#result.error {
+  color: #ffb6af;
+}
+
+audio {
+  width: 100%;
+  margin-top: 8px;
+}

@@ -3,31 +3,35 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Live Dub MVP</title>
+    <title>Live Dub</title>
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
     <main class="popup">
       <header class="popup-header">
         <div>
-          <h1>Live Dub MVP</h1>
+          <h1>Live Dub</h1>
           <p data-version></p>
         </div>
-        <span class="status-chip" data-status>checking</span>
+        <span class="status-chip" data-status>확인 중</span>
       </header>
 
       <section class="actions">
-        <button class="primary" type="button" data-open>Open panel</button>
-        <button type="button" data-close>Close panel</button>
-        <button type="button" data-toggle>Toggle</button>
+        <button class="primary" type="button" data-open>유튜브 더빙 패널 열기</button>
+        <button type="button" data-close>패널 닫기</button>
+        <button type="button" data-toggle>패널 토글</button>
       </section>
 
       <section class="details" data-details>
-        Open a YouTube watch page first.
+        유튜브 영상 시청 페이지(watch)에서 패널을 열 수 있습니다.
       </section>
+
       <section class="media-actions">
         <button class="primary" type="button" data-player>MP4 · 웹영상 플레이어 열기</button>
-        <button type="button" data-find-video>현재 페이지 영상 찾기</button>
+        <div class="sub-actions">
+          <button type="button" data-find-video>현재 페이지 영상 찾기</button>
+          <button type="button" data-diagnostics>로컬 진단 화면</button>
+        </div>
         <div data-videos aria-live="polite">공개 MP4를 로컬 플레이어로 가져옵니다.</div>
       </section>
     </main>

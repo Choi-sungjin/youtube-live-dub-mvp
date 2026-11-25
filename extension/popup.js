@@ -16,6 +16,8 @@ document.addEventListener("DOMContentLoaded", () => {
   els.toggle.addEventListener("click", () => runCommand("YLD_PANEL_TOGGLE"));
   document.querySelector('[data-player]').onclick = () => openLocalPlayer();
   document.querySelector('[data-find-video]').onclick = findPageVideos;
+  const diagBtn = document.querySelector('[data-diagnostics]');
+  if (diagBtn) diagBtn.onclick = () => chrome.tabs.create({ url: 'http://127.0.0.1:18789/diagnostics' });
 
   refreshStatus();
 });
@@ -66,7 +68,7 @@ async function refreshStatus() {
   try {
     const tab = await getActiveTab();
     if (!isYouTubeWatchTab(tab)) {
-      setUnavailable("Open a YouTube watch page first.");
+      setUnavailable("유튜브 영상 시청 페이지(watch)를 열면 더빙 패널을 제어할 수 있습니다. 일반 웹영상은 아래 플레이어를 이용하세요.");
       return;
     }
 
@@ -82,7 +84,7 @@ async function runCommand(type) {
   try {
     const tab = await getActiveTab();
     if (!isYouTubeWatchTab(tab)) {
-      setUnavailable("Open a YouTube watch page first.");
+      setUnavailable("유튜브 영상 시청 페이지(watch)를 열면 더빙 패널을 제어할 수 있습니다. 일반 웹영상은 아래 플레이어를 이용하세요.");
       return;
     }
 
@@ -123,11 +125,11 @@ async function injectContent(tabId) {
 function renderStatus(payload = {}) {
   setButtonsEnabled(true);
   els.status.classList.remove("error");
-  els.status.textContent = payload.visible ? "visible" : "hidden";
+  els.status.textContent = payload.visible ? "표시 중" : "숨김";
   els.details.innerHTML = [
-    `<strong>Panel:</strong> ${escapeHtml(payload.visible ? "open" : "closed")}`,
-    `<strong>Dub:</strong> ${escapeHtml(payload.status || "idle")}`,
-    `<strong>Video:</strong> ${escapeHtml(payload.videoId || "unknown")}`,
+    `<strong>패널:</strong> ${escapeHtml(payload.visible ? "열림" : "닫힘")}`,
+    `<strong>상태:</strong> ${escapeHtml(payload.status || "idle")}`,
+    `<strong>영상:</strong> ${escapeHtml(payload.videoId || "unknown")}`,
     `<strong>설치 버전:</strong> ${escapeHtml(VERSION)}`,
     `<strong>페이지 버전:</strong> ${escapeHtml(payload.version || "확인 불가")}`,
   ].map((line) => `<div>${line}</div>`).join("");
@@ -136,20 +138,20 @@ function renderStatus(payload = {}) {
 function setUnavailable(message) {
   setButtonsEnabled(false);
   els.status.classList.remove("error");
-  els.status.textContent = "no tab";
+  els.status.textContent = "대기";
   els.details.textContent = message;
 }
 
 function setBusy(label) {
   setButtonsEnabled(false);
   els.status.classList.remove("error");
-  els.status.textContent = label;
+  els.status.textContent = label === "working" ? "처리 중" : label;
 }
 
 function setError(message) {
   setButtonsEnabled(true);
   els.status.classList.add("error");
-  els.status.textContent = "error";
+  els.status.textContent = "오류";
   els.details.textContent = message;
 }
 

@@ -1,6 +1,6 @@
 import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker, analyzeCapturedSpeakers } from './speaker-voices.js';
 import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
-import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_VOICE_MODEL, OPENAI_VOICES } from './openai-audio.js';
+import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_TEXT_MODELS, OPENAI_SERVICE_TIERS, OPENAI_VOICE_MODEL, OPENAI_VOICES, resolveOpenAiTextModel, resolveOpenAiServiceTier } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
 import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus, closeSupertonic } from './supertonic-speech.js';
 import { createDiskTextCache } from './disk-text-cache.js';
@@ -93,6 +93,13 @@ const server = createServer(async (req, res) => {
 
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
+    if (req.method === 'GET' && url.pathname === '/favicon.ico') {
+      const icon = await readFile(path.join(ROOT_DIR, 'extension', 'icons', 'icon-32.png'));
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+      res.end(icon);
+      return;
+    }
+
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/diagnostics')) {
       const html = await readFile(path.join(__dirname, 'diagnostics.html'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -136,7 +143,8 @@ const server = createServer(async (req, res) => {
           });
           if (!res.destroyed) res.end(JSON.stringify({type:'done',result})+'\n');
         } catch (error) {
-          if (!res.destroyed) res.end(JSON.stringify({type:'error',error:error.message})+'\n');
+          const retryable = typeof error.retryable === 'boolean' ? error.retryable : (error.statusCode || 500) >= 500 && error.statusCode !== 503;
+          if (!res.destroyed) res.end(JSON.stringify({type:'error',error:error.message,retryable})+'\n');
         }
         return;
       }
@@ -209,7 +217,9 @@ const server = createServer(async (req, res) => {
     const status = error.statusCode || (error.code === 'ENOENT' ? 404 : 500);
     if (status >= 500) console.warn(`${req.method} ${String(req.url || '').split('?')[0]} failed (${status}): ${error.message}`);
     json(res, status, {
-      error: error.message || 'Unexpected server error'
+      error: error.message || 'Unexpected server error',
+      // Lets the panel skip one clip on a transient failure but stop on key, quota or setup errors.
+      retryable: typeof error.retryable === 'boolean' ? error.retryable : status >= 500 && status !== 503
     });
   }
 });
@@ -251,6 +261,8 @@ function providerInfo() {
     translationLocation: translationProvider === 'ollama' ? 'local' : translationProvider === 'mock' ? 'test' : 'external',
     tts: ttsProvider,
     openaiModel: process.env.OPENAI_MODEL || OPENAI_TEXT_MODEL,
+    openaiModels: OPENAI_TEXT_MODELS,
+    openaiServiceTiers: OPENAI_SERVICE_TIERS,
     zaiModel: process.env.ZAI_MODEL || 'glm-4.7',
     zaiConfigured: Boolean(process.env.ZAI_API_KEY),
     supertoneModel: process.env.SUPERTONE_MODEL || 'sona_speech_2_flash',
@@ -297,7 +309,8 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
       allowDownload: !['youtube-buffered', 'youtube-captured'].includes(body?.source)}))
     : Promise.resolve(limitedSegments.map(() => null));
   const translationStarted = performance.now();
-  const translated = await translateSegments(limitedSegments, settings, timings);
+  const translationFallbacks = new Map();
+  const translated = await translateSegments(limitedSegments, settings, timings, translationFallbacks);
   timings.translationMs = Math.round(performance.now() - translationStarted);
   const speakers = await speakerResults;
   const speechStarted = performance.now();
@@ -311,49 +324,52 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
     // Local translation has already shortened and checked required facts. Do not
     // silently remove the end of a complete sentence after that validation.
     const spokenText = normalizeDubbingTranslation(cleanText(translation), segment.text, settings.targetLang);
-    const synthesisText = settings.ttsProvider === 'supertonic3' ? speechText(spokenText, settings.targetLang) : spokenText;
-    const cacheKey = {
-      schemaVersion: 2,
-      videoId,
-      segment: { index: segment.index, start: segment.start, end: segment.end, text: segment.text },
-      settings: cacheableSettings(speechSettings),
-      translatedText: spokenText,
-      speechText: synthesisText,
-      speechTextRevision: SPEECH_TEXT_REVISION,
-      providers: {
-        translation: activeTranslationProvider(settings),
-        tts: activeTtsProvider(settings)
-      }
-    };
-    const id = hashValue(cacheKey);
-    const audioPath = path.join(AUDIO_DIR, `${id}.wav`);
-    const exists = await fileExists(audioPath);
     const sourceDuration = Math.max(0.55, Math.min(12, segment.end - segment.start));
-    let audioDuration = sourceDuration;
-    let actualTtsModel = settings.ttsModel;
-    let synthesisMs = 0;
-    let firstAudioMs = null;
-    let audioTranscript = null;
-    if (exists) audioDuration = wavDuration(await readFile(audioPath));
-
-    if (!exists) {
-      const result = await synthesizeSpeech({
-        text: synthesisText,
-        duration: sourceDuration,
-        settings: speechSettings,
-        outputPath: audioPath
+    const clipFor = ttsSettings => {
+      const synthesisText = ttsSettings.ttsProvider === 'supertonic3' ? speechText(spokenText, settings.targetLang) : spokenText;
+      const id = hashValue({
+        schemaVersion: 2,
+        videoId,
+        segment: { index: segment.index, start: segment.start, end: segment.end, text: segment.text },
+        settings: cacheableSettings(ttsSettings),
+        translatedText: spokenText,
+        speechText: synthesisText,
+        speechTextRevision: SPEECH_TEXT_REVISION,
+        providers: {
+          translation: activeTranslationProvider(settings),
+          tts: activeTtsProvider(ttsSettings)
+        }
       });
-      audioDuration = result.duration || audioDuration;
-      actualTtsModel = result.ttsModel || actualTtsModel;
-      synthesisMs = result.synthesisMs || 0;
-      firstAudioMs = result.firstAudioMs ?? null;
-      audioTranscript = result.transcript ?? null;
+      return { settings: ttsSettings, synthesisText, id, audioPath: path.join(AUDIO_DIR, `${id}.wav`) };
+    };
+    const cachedClip = async clip => await fileExists(clip.audioPath) ? { hit: true, duration: wavDuration(await readFile(clip.audioPath)) } : null;
+    const synthesizeClip = async clip => ({ hit: false, ...await synthesizeSpeech({
+      text: clip.synthesisText,
+      duration: sourceDuration,
+      settings: clip.settings,
+      outputPath: clip.audioPath
+    }) });
+
+    let clip = clipFor(speechSettings);
+    let voiceFallback = '';
+    let result = await cachedClip(clip);
+    if (!result && speechSettings.ttsProvider === 'openai-realtime') {
+      ({ value: result, fallback: voiceFallback } = await preferOpenAI(
+        () => synthesizeClip(clip),
+        async () => {
+          clip = clipFor(localVoiceSettings(speechSettings));
+          return await cachedClip(clip) || synthesizeClip(clip);
+        }));
+    } else if (!result) {
+      result = await synthesizeClip(clip);
     }
+    const audioDuration = result.duration || sourceDuration;
+    const translationFallback = translationFallbacks.get(segment.index) || '';
 
     const completed = {
-      hit: exists,
+      hit: result.hit,
       item: {
-        id,
+        id: clip.id,
         index: segment.index,
         start: segment.start,
         end: segment.end,
@@ -361,17 +377,20 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
         endMs: Math.round(segment.end * 1000),
         sourceText: segment.text,
         translatedText: spokenText,
-        speechText: synthesisText,
-        audioUrl: `http://${HOST}:${PORT}/audio/${id}.wav`,
+        speechText: clip.synthesisText,
+        audioUrl: `http://${HOST}:${PORT}/audio/${clip.id}.wav`,
         duration: roundTime(audioDuration),
         durationMs: Math.round(audioDuration * 1000),
-        synthesisMs,
-        firstAudioMs,
-        audioTranscript,
-        speechSpeed: settings.speed,
-        voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : speechSettings.voice,
+        synthesisMs: result.synthesisMs || 0,
+        firstAudioMs: result.firstAudioMs ?? null,
+        audioTranscript: result.transcript ?? null,
+        speechSpeed: clip.settings.speed,
+        voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : clip.settings.voice,
         speaker,
-        ttsModel: actualTtsModel
+        ttsModel: result.ttsModel || clip.settings.ttsModel,
+        fallback: voiceFallback || translationFallback
+          ? { ...(translationFallback && { translation: translationFallback }), ...(voiceFallback && { voice: voiceFallback }) }
+          : null
       }
     };
     onPrepared?.(completed.item);
@@ -728,6 +747,8 @@ function normalizeSettings(settings = {}) {
     mode: settings.mode,
     autoSpeaker: ['openai-realtime', 'supertonic3'].includes(ttsProvider) && (settings.voice === 'auto' || settings.autoSpeaker === true),
     translationProvider: mode?.translationProvider || activeTranslationProvider(),
+    openaiModel: /^[A-Za-z0-9._:-]{1,80}$/.test(String(settings.openaiModel || '').trim()) ? String(settings.openaiModel).trim() : (process.env.OPENAI_MODEL || 'gpt-6.2-sol'),
+    openaiServiceTier: ['', 'fast', 'ultrafast'].includes(settings.openaiServiceTier) ? settings.openaiServiceTier : '',
     voice,
     tone: String(settings.tone || process.env.SUPERTONE_STYLE || 'neutral'),
     pitchShift: clamp(Number(settings.pitchShift ?? process.env.SUPERTONE_PITCH_SHIFT ?? 0), -24, 24),
@@ -761,7 +782,41 @@ function normalizeSegment(segment, fallbackIndex) {
   };
 }
 
-async function translateSegments(segments, settings, metrics = {}) {
+// GPT voices map to the closest local Supertonic timbre so a fallback clip keeps the speaker's gender.
+const LOCAL_VOICE_FOR_OPENAI = { marin: 'F1', coral: 'F1', cedar: 'M1', alloy: 'M1' };
+const OPENAI_OUTAGE_COOLDOWN_MS = 20000;
+let openaiOutageUntil = 0;
+
+function localVoiceSettings(settings) {
+  return { ...settings, ttsProvider: 'supertonic3', ttsModel: 'supertonic-3', speed: 1.15, voice: LOCAL_VOICE_FOR_OPENAI[settings.voice] || 'F1' };
+}
+
+// OpenAI stays the first choice. When it is unreachable even after retries, the local engine
+// finishes the clip and OpenAI is skipped briefly, so each clip does not wait out the same timeout.
+// Key, quota and setup errors are not retryable and still surface to the user.
+async function preferOpenAI(useOpenAI, useLocal) {
+  let outage = Date.now() < openaiOutageUntil
+    ? Object.assign(new Error('OpenAI was unreachable moments ago.'), { retryable: true, statusCode: 503 })
+    : null;
+  if (!outage) {
+    try {
+      return { value: await useOpenAI(), fallback: '' };
+    } catch (error) {
+      if (!error.retryable) throw error;
+      outage = error;
+      openaiOutageUntil = Date.now() + OPENAI_OUTAGE_COOLDOWN_MS;
+      console.warn(`${error.message} Using local engines for ${OPENAI_OUTAGE_COOLDOWN_MS / 1000} s.`);
+    }
+  }
+  try {
+    return { value: await useLocal(), fallback: outage.message };
+  } catch (localError) {
+    outage.message += ` Local fallback failed: ${localError.message}`;
+    throw outage;
+  }
+}
+
+async function translateSegments(segments, settings, metrics = {}, fallbacks = new Map()) {
   const provider = activeTranslationProvider(settings);
   const translated = new Map();
   const missing = [];
@@ -781,6 +836,7 @@ async function translateSegments(segments, settings, metrics = {}) {
   }
 
   let providerTranslations = new Map();
+  let usedProvider = provider;
   try {
     if (provider === 'ollama') {
       providerTranslations = await LOCAL_TRANSLATOR.translate(missing, settings, metrics);
@@ -790,7 +846,16 @@ async function translateSegments(segments, settings, metrics = {}) {
       }
       providerTranslations = await translateSegmentsWithZai(missing, settings);
     } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
-      providerTranslations = await translateOpenAI(missing, settings, metrics);
+      const { value, fallback } = await preferOpenAI(
+        () => translateOpenAI(missing, settings, metrics),
+        () => LOCAL_TRANSLATOR.translate(missing, settings, metrics));
+      providerTranslations = value;
+      if (fallback) {
+        // Cache Gemma text under its own provider so it never replays as a GPT translation.
+        usedProvider = 'ollama';
+        metrics.translationFallback = fallback;
+        for (const segment of missing) fallbacks.set(segment.index, fallback);
+      }
     } else if (provider === 'mock') {
       providerTranslations = new Map(missing.map(segment => [segment.index, translateMock(segment.text, settings)]));
     } else {
@@ -807,7 +872,7 @@ async function translateSegments(segments, settings, metrics = {}) {
     const providerText = providerTranslations.get(segment.index);
     if (providerText) {
       translated.set(segment.index, providerText);
-      await setCachedTranslation(segment, settings, provider, providerText);
+      await setCachedTranslation(segment, settings, usedProvider, providerText);
     } else {
       throw httpError(502, `Translation provider omitted segment ${segment.index}; no substitute text was generated.`);
     }
@@ -1020,7 +1085,7 @@ function translationCacheKey(segment, settings, provider) {
   return hashValue({
     schemaVersion: 2,
     provider,
-    model: provider === 'ollama' ? LOCAL_TRANSLATOR.status().model : provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : process.env.OPENAI_MODEL || OPENAI_TEXT_MODEL,
+    model: provider === 'ollama' ? LOCAL_TRANSLATOR.status().model : provider === 'zai' ? process.env.ZAI_MODEL || 'glm-4.7' : settings?.openaiModel || process.env.OPENAI_MODEL || OPENAI_TEXT_MODEL,
     localRevision: provider === 'ollama' ? LOCAL_TRANSLATION_REVISION : undefined,
     context: provider === 'ollama' ? translationContext(segment) : provider === 'openai' ? segment.contextBefore || '' : undefined,
     targetLang: settings.targetLang,
