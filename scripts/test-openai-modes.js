@@ -139,6 +139,15 @@ test('Realtime voice names the real cause, fails fast on key/access/quota and ne
 test('empty and odd-length PCM are rejected instead of producing corrupt WAV files',()=>{
   assert.throws(()=>pcmWave(Buffer.alloc(0)),/invalid/);assert.throws(()=>pcmWave(Buffer.alloc(3)),/invalid/);
 });
+test('pcmWave applies a short zero-crossing edge fade to prevent clip boundary pops while preserving interior audio',()=>{
+  const raw = Buffer.alloc(4800);
+  for (let i = 0; i < 2400; i++) raw.writeInt16LE(4000, i * 2);
+  const wav = pcmWave(raw);
+  assert.equal(wav.length, 4844);
+  assert.equal(wav.readInt16LE(44), 0);
+  assert.equal(wav.readInt16LE(wav.length - 2), 0);
+  assert.equal(wav.readInt16LE(44 + 1200 * 2), 4000);
+});
 
 
 test('GPT translation cache separates identical captions with different preceding context', async () => {

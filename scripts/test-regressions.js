@@ -695,3 +695,78 @@ test('local translator resolves an installed local Gemma 4 tag when configured m
   assert.equal(status.model, 'gemma4:e2b');
   assert.deepEqual(calls, ['gemma4:e4b-it-q4_K_M', 'gemma4:e2b']);
 });
+
+test('dubbing sync keeps natural 1.0x-1.18x pace, uses silent gaps, and avoids mid-clip micro-seek crackles', async () => {
+  const f = await contentFixture();
+  const makeTrackedAudio = (duration) => {
+    const seeks = [];
+    let pos = 0;
+    return {
+      duration,
+      paused: true,
+      ended: false,
+      playbackRate: 1,
+      preservesPitch: false,
+      seeks,
+      advance(dt) { pos += dt; },
+      get currentTime() { return pos; },
+      set currentTime(value) { pos = value; seeks.push(value); },
+      pause() { this.paused = true; },
+      play() { this.paused = false; return Promise.resolve(); },
+    };
+  };
+  const shortClip = makeTrackedAudio(3.2);
+  const gapClip = makeTrackedAudio(3.5);
+  const longClip = makeTrackedAudio(7.5);
+  f.state.running = true;
+  f.state.chunks = [
+    { index: 0, start: 0, end: 5, text: 'short' },
+    { index: 1, start: 10, end: 12, text: 'has pause after' },
+    { index: 2, start: 14, end: 18, text: 'long translation' },
+  ];
+  f.state.prepared = [
+    { chunkIndex: 0, start: 0, end: 5, ttsModel: 'gpt-realtime-2.1-mini', audio: shortClip },
+    { chunkIndex: 1, start: 10, end: 12, ttsModel: 'gpt-realtime-2.1-mini', audio: gapClip },
+    { chunkIndex: 2, start: 14, end: 18, ttsModel: 'gpt-realtime-2.1-mini', audio: longClip },
+  ];
+
+  // 1) Shorter translation never slows down to 0.85x; natural entry near start never chops onset or seeks.
+  f.video.currentTime = 0.12;
+  f.syncAudioToVideo();
+  assert.equal(shortClip.playbackRate, 1);
+  assert.equal(shortClip.preservesPitch, true);
+  assert.deepEqual(shortClip.seeks, []);
+
+  // Pipeline startup jitter of ~250ms while playing must NOT trigger mid-vowel seekAudio crackles.
+  f.video.currentTime = 0.62;
+  shortClip.advance(0.25); // 250ms behind predicted 0.50s -> |0.25 - 0.50| = 0.25s <= 0.45s tolerance
+  f.syncAudioToVideo();
+  assert.deepEqual(shortClip.seeks, []);
+
+  // 2) Silent pause before next caption (12..14s) lets a 3.5s clip play at natural 1.0x instead of rushing.
+  f.video.currentTime = 10.05;
+  f.syncAudioToVideo();
+  assert.equal(gapClip.playbackRate, 1);
+  assert.deepEqual(gapClip.seeks, []);
+
+  // 3) Very long translation caps catch-up speed at 1.18x instead of WSOLA-crushing at 1.75x.
+  f.video.currentTime = 14.05;
+  f.syncAudioToVideo();
+  assert.equal(longClip.playbackRate, 1.18);
+  assert.equal(longClip.preservesPitch, true);
+  f.stopDub();
+});
+
+test('expanded STT windows trim cross-boundary overlap instead of colliding mid-sentence', async () => {
+  const f = await contentFixture({ expand: async () => true });
+  f.state.sourceSegments = [{ start: 164.4, end: 168.3, text: 'When scoring we use both models.' }];
+  f.state.chunks = [{ index: 0, start: 164.4, end: 168.3, text: 'When scoring we use both models.', segments: f.state.sourceSegments }];
+  const installed = f.maybeInstallExpandedSegments([
+    { start: 164.4, end: 168.2, text: 'duplicate overlap fragment' },
+    { start: 166.3, end: 169.5, text: 'to score the available options.' },
+  ]);
+  assert.equal(installed, true);
+  assert.equal(f.state.sourceSegments.length, 2);
+  assert.equal(f.state.sourceSegments[1].start, 168.3);
+  assert.equal(f.state.sourceSegments[1].end, 169.5);
+});

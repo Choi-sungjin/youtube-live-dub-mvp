@@ -384,7 +384,7 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
         synthesisMs: result.synthesisMs || 0,
         firstAudioMs: result.firstAudioMs ?? null,
         audioTranscript: result.transcript ?? null,
-        speechSpeed: clip.settings.speed,
+        speechSpeed: result.speechSpeed || clip.settings.speed,
         voiceId: settings.ttsProvider === 'windows-sapi' ? `windows:${settings.targetLang}` : clip.settings.voice,
         speaker,
         ttsModel: result.ttsModel || clip.settings.ttsModel,

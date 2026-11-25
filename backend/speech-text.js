@@ -1,4 +1,4 @@
-export const SPEECH_TEXT_REVISION = 'ko-terms-trim-v5';
+export const SPEECH_TEXT_REVISION = 'ko-terms-trim-v6';
 export function normalizeDubbingTranslation(text, source, language) {
   if(language !== 'ko' || !/\bsee you\b/i.test(source))return text;
   let result=text;

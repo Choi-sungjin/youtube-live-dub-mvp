@@ -5,7 +5,7 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.9.2";
+  const BUILD_VERSION = "0.9.3";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -34,8 +34,10 @@
   const STT_MAX_DURATION_SECONDS = 2 * 60 * 60;
   const ENABLE_VISIBLE_CAPTION_FALLBACK = false;
   const VISIBLE_CAPTION_COLLECT_MS = 12000;
-  const SYNC_TOLERANCE_SECONDS = 0.18;
-  const MAX_SYNC_PLAYBACK_RATE = 1.75;
+  const SYNC_TOLERANCE_SECONDS = 0.45;
+  const MIN_SYNC_PLAYBACK_RATE = 1.0;
+  const MAX_SYNC_PLAYBACK_RATE = 1.18;
+  const NATURAL_CLIP_START_GRACE_SECONDS = 0.25;
 
   const state = {
     connectionLost: false,
@@ -878,12 +880,22 @@
 
     const item = state.prepared[chunkIndex];
     const audioDuration = item.audio?.duration || item.duration || Math.max(0, item.end - item.start);
-    const segmentDuration = Math.max(0.35, item.end - item.start);
+    const nextChunk = state.chunks.find((chunk) => chunk.index !== item.chunkIndex && chunk.start >= item.end - 0.05);
+    const slotEnd = nextChunk
+      ? Math.max(item.end, Math.min(item.end + 4, nextChunk.start - PREPARE_LEAD_SECONDS))
+      : item.end;
+    const segmentDuration = Math.max(0.35, slotEnd - item.start);
     // Supertonic files already contain the requested 1.15x speech. Do not retime them again.
     const syncRate = item.ttsModel === "supertonic-3" ? 1 : clampPlaybackRate(audioDuration / segmentDuration);
     const userSpeed = getDubSpeed();
     if (state.audioRateAnchor?.audio !== item.audio) {
-      state.audioRateAnchor = {audio:item.audio, videoTime:item.start, audioTime:0, syncRate};
+      const naturalEntry = videoTime <= item.start + NATURAL_CLIP_START_GRACE_SECONDS;
+      state.audioRateAnchor = {
+        audio: item.audio,
+        videoTime: naturalEntry ? videoTime : item.start,
+        audioTime: 0,
+        syncRate,
+      };
     }
     const anchor = state.audioRateAnchor;
     anchor.syncRate = syncRate;
@@ -897,6 +909,7 @@
       // Preserve this clip/anchor until its real ended event; resetting either
       // would let the next tick re-enter the same sentence at an older offset.
       if (item.chunkIndex === state.currentChunkIndex && state.currentAudio) {
+        state.currentAudio.preservesPitch = true;
         state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1) * userSpeed;
         if (state.currentAudio.paused && !state.currentAudio.ended) playAudio(state.currentAudio);
         return;
@@ -912,8 +925,11 @@
       state.currentAudio = item.audio;
       state.audioRateAnchor = anchor;
       state.currentAudio.volume = 1;
+      state.currentAudio.preservesPitch = true;
       state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1) * userSpeed;
-      seekAudio(state.currentAudio, offset);
+      if (offset > 0.02 || state.currentAudio.currentTime > 0.02) {
+        seekAudio(state.currentAudio, offset);
+      }
       playAudio(state.currentAudio);
       updateMeta(
         state.videoId,
@@ -927,10 +943,12 @@
       return;
     }
 
+    state.currentAudio.preservesPitch = true;
     state.currentAudio.playbackRate = syncRate * (state.video.playbackRate || 1) * userSpeed;
 
     if (Math.abs(state.currentAudio.currentTime - offset) > SYNC_TOLERANCE_SECONDS) {
       seekAudio(state.currentAudio, offset);
+      state.audioRateAnchor = { audio: state.currentAudio, videoTime, audioTime: offset, syncRate };
     }
 
     if (state.currentAudio.paused) {
@@ -1191,6 +1209,7 @@
     if (sessionId !== state.sessionId) return;
     const audio = new Audio(fetched.dataUrl);
     audio.volume = 1;
+    audio.preservesPitch = true;
     audio.playbackRate = getDubSpeed();
     state.testAudio = audio;
 
@@ -1260,6 +1279,7 @@
 
         const audio = new Audio(fetched.dataUrl);
         audio.preload = "auto";
+        audio.preservesPitch = true;
         item.audio = audio;
         await waitForAudioReady(audio);
       })
@@ -2721,10 +2741,19 @@
 
     merged.forEach((segment) => {
       const key = `${Math.round(segment.start * 10)}:${Math.round(segment.end * 10)}:${segment.text}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        result.push(segment);
+      if (seen.has(key)) {
+        return;
       }
+      seen.add(key);
+      const prev = result[result.length - 1];
+      if (prev && segment.start < prev.end - 0.05) {
+        if (segment.end <= prev.end + 0.35) {
+          return;
+        }
+        result.push({ start: prev.end, end: segment.end, text: segment.text });
+        return;
+      }
+      result.push(segment);
     });
 
     return result;
@@ -3733,7 +3762,7 @@
 
   function clampPlaybackRate(value) {
     const rate = Number.isFinite(value) && value > 0 ? value : 1;
-    return Math.min(MAX_SYNC_PLAYBACK_RATE, Math.max(0.85, rate));
+    return Math.min(MAX_SYNC_PLAYBACK_RATE, Math.max(MIN_SYNC_PLAYBACK_RATE, rate));
   }
 
   function formatTime(value) {

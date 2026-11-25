@@ -158,6 +158,7 @@ export class LocalDubPlayer {
         if(offset>=clip.duration) { this.completed.add(clip.index); }
         else {
           const audio=this.audioFactory(clip.objectUrl);
+          audio.preservesPitch=true;
           this.voice={clip,audio}; audio.playbackRate=this.video.playbackRate; audio.currentTime=offset;
           audio.onended=()=>{
             if(epoch!==this.epoch)return;
