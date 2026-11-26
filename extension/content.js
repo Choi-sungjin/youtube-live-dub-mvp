@@ -5,10 +5,13 @@
   window.__YLD_CONTENT_SCRIPT_READY__ = true;
 
   const PANEL_ID = "yld-panel";
-  const BUILD_VERSION = "0.9.3";
+  const VIDEO_HUD_ID = "yld-video-hud";
+  const BUILD_VERSION = "0.9.5";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
+  const AUTO_CONTINUE_STORAGE_KEY = "yld-auto-continue";
+  const AUTO_CONTINUE_SESSION_KEY = "yld-auto-continue-last-video";
   const DEFAULT_ORIGINAL_VOLUME = 35;
   const PREPARE_LEAD_SECONDS = 0.18;
   const BUFFER_WINDOW_SECONDS = 90;
@@ -62,8 +65,24 @@
     originalMuted: null,
     resumeVideoAfterPrepare: false,
     startupPreparing: false,
+    startupStartedAt: 0,
+    prepareBatchStartedAt: 0,
     wasPlayingBeforeStart: false,
     playbackHold: null,
+    boundVideo: null,
+    lastProgrammaticPauseAt: 0,
+    lastProgrammaticPlayAt: 0,
+    lastUserSeekAt: 0,
+    lastSeekTargetTime: null,
+    userPlayConfirmedAt: 0,
+    extraPlayClickAt: 0,
+    lastResumedAt: 0,
+    uiTimer: null,
+    autoContinue: false,
+    lastKnownVideoId: "",
+    queuedAutoVideoId: "",
+    pendingAutoContinue: null,
+    autoContinueTimer: null,
     lastSyncVideoTime: null,
     metrics: null,
     sourceSegments: [],
@@ -101,16 +120,20 @@
 
   function init() {
     ensurePanel();
+    state.autoContinue = getSavedAutoContinue();
+    state.lastKnownVideoId = getVideoId();
     state.recoveryResume = consumeRecovery();
     bindPanelEvents();
+    renderAutoContinueControls();
     refreshPageState();
     setStatus("idle");
+    maybeResumeContinuousSessionOnLoad();
 
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
     window.addEventListener("message", handlePageMessage);
     installPageProbe();
     document.addEventListener("yt-navigate-start", () => {
-      if (state.running) stopDub({ resumeVideo: false });
+      if (state.running) stopDub({ resumeVideo: false, preserveAutoContinue: true });
     });
     document.addEventListener("yt-navigate-finish", handleNavigation);
     window.addEventListener("popstate", handleNavigation);
@@ -152,11 +175,29 @@
           </fieldset>
           <p class="yld-mode-note" data-yld-mode-note></p>
 
+        <div class="yld-state-banner" data-yld-state-banner data-tone="idle" hidden role="status" aria-live="polite">
+          <div class="yld-state-top">
+            <span class="yld-state-badge" data-yld-state-title>대기 중</span>
+            <button class="yld-state-action" type="button" data-yld-state-action hidden>일시정지</button>
+          </div>
+          <div class="yld-state-detail" data-yld-state-detail></div>
+          <div class="yld-state-progress" data-yld-state-progress hidden>
+            <div class="yld-state-progress-fill" data-yld-state-progress-fill></div>
+          </div>
+        </div>
 
         <div class="yld-row-inline">
           <button class="yld-panel-button yld-primary" type="button" data-yld-start>Start</button>
           <button class="yld-panel-button" type="button" data-yld-stop disabled>Stop</button>
         </div>
+
+        <button class="yld-auto-continue-toggle" type="button" role="switch" aria-checked="false" data-yld-auto-continue>
+          <span class="yld-auto-continue-copy">
+            <strong data-yld-auto-continue-label>🔁 다음 영상 이어서 더빙</strong>
+            <small data-yld-auto-continue-hint>꺼짐 · 영상마다 직접 Start를 누릅니다</small>
+          </span>
+          <span class="yld-switch-pill" data-yld-auto-continue-pill>OFF</span>
+        </button>
 
         <div class="yld-row">
           <label class="yld-label" for="yld-volume">
@@ -309,6 +350,15 @@
     els.meta = panel.querySelector("[data-yld-meta]");
     els.error = panel.querySelector("[data-yld-error]");
     els.diagnostics = panel.querySelector("[data-yld-diagnostics]");
+    els.stateBanner = panel.querySelector("[data-yld-state-banner]");
+    els.stateTitle = panel.querySelector("[data-yld-state-title]");
+    els.stateDetail = panel.querySelector("[data-yld-state-detail]");
+    els.stateAction = panel.querySelector("[data-yld-state-action]");
+    els.stateProgress = panel.querySelector("[data-yld-state-progress]");
+    els.stateProgressFill = panel.querySelector("[data-yld-state-progress-fill]");
+    els.autoContinue = panel.querySelector("[data-yld-auto-continue]");
+    els.autoContinueHint = panel.querySelector("[data-yld-auto-continue-hint]");
+    els.autoContinuePill = panel.querySelector("[data-yld-auto-continue-pill]");
   }
 
   function bindPanelEvents() {
@@ -439,6 +489,8 @@
     });
     els.start.addEventListener("click", startDub);
     els.stop.addEventListener("click", stopDub);
+    els.autoContinue?.addEventListener("click", () => toggleAutoContinue());
+    els.stateAction?.addEventListener("click", handlePlaybackBannerAction);
     els.test.addEventListener("click", testBackend);
     els.hide.addEventListener("click", () => setPanelVisible(false));
     els.backend.addEventListener("change", () => saveBackendUrl(els.backend.value));
@@ -552,6 +604,9 @@
     }
 
     const sessionId = ++state.sessionId;
+    clearPendingAutoContinue();
+    state.queuedAutoVideoId = state.videoId;
+    saveAutoContinueSessionVideo(state.videoId);
     state.running = true;
     state.browserAudioSource = false;
     state.bufferedAudioSource = false;
@@ -569,9 +624,19 @@
     state.originalMuted = state.video.muted;
     state.wasPlayingBeforeStart = !state.video.paused && !state.video.ended;
     state.startupPreparing = true;
+    state.startupStartedAt = Date.now();
+    state.prepareBatchStartedAt = 0;
+    state.extraPlayClickAt = 0;
+    state.userPlayConfirmedAt = Date.now();
+    if (state.uiTimer) clearInterval(state.uiTimer);
+    state.uiTimer = setInterval(() => {
+      renderPlaybackStateUi();
+    }, 200);
+    state.uiTimer?.unref?.();
     pauseVideoForPrepareIfNeeded();
     applyOriginalVolume();
     setStatus("captions");
+    renderPlaybackStateUi();
 
     try {
       await ensureBackendReady(els.backend.value);
@@ -637,7 +702,7 @@
     if (!state.video) return;
     // Start is an explicit request to play the dub, even when the video was paused.
     state.resumeVideoAfterPrepare = true;
-    if (!state.video.paused) state.video.pause();
+    pauseVideoProgrammatically();
     updateMeta(
       state.videoId || getVideoId() || "unknown",
       "not loaded",
@@ -711,6 +776,9 @@
 
   function stopDub(options = {}) {
     state.recoveryResume = null;
+    if (!options.preserveAutoContinue) {
+      clearPendingAutoContinue();
+    }
     const shouldResume = options.resumeVideo !== false && state.resumeVideoAfterPrepare &&
       (!state.startupPreparing || state.wasPlayingBeforeStart);
     state.sourceCapture?.cancel();
@@ -720,6 +788,9 @@
     state.captionAbortController = null;
     state.running = false;
     state.startupPreparing = false;
+    state.startupStartedAt = 0;
+    state.prepareBatchStartedAt = 0;
+    state.extraPlayClickAt = 0;
     els.start.disabled = false;
     els.stop.disabled = true;
 
@@ -730,6 +801,10 @@
     if (state.bufferTimer) {
       clearInterval(state.bufferTimer);
       state.bufferTimer = null;
+    }
+    if (state.uiTimer) {
+      clearInterval(state.uiTimer);
+      state.uiTimer = null;
     }
 
     stopCurrentAudio();
@@ -837,7 +912,8 @@
         finishPlaybackHold();
         resumeVideoIfNeeded();
       } else {
-        if (!state.video.paused) state.video.pause();
+        pauseVideoProgrammatically();
+        renderPlaybackStateUi();
         return;
       }
     }
@@ -849,6 +925,7 @@
       if (state.currentAudio && !state.currentAudio.paused) {
         pauseDubAudio(state.currentAudio);
       }
+      renderPlaybackStateUi();
       return;
     }
 
@@ -936,10 +1013,12 @@
         `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
         formatAudioState(`playing clip ${item.chunkIndex + 1}/${state.chunks.length} @${state.currentAudio.playbackRate.toFixed(2)}x`, videoTime)
       );
+      renderPlaybackStateUi();
       return;
     }
 
     if (!state.currentAudio) {
+      renderPlaybackStateUi();
       return;
     }
 
@@ -954,15 +1033,18 @@
     if (state.currentAudio.paused) {
       playAudio(state.currentAudio);
     }
+    renderPlaybackStateUi();
   }
 
   function holdPlayback(reason) {
     if (state.playbackHold || state.video.paused || state.video.ended) return;
     state.playbackHold = { reason, startedAt: Date.now() };
     state.resumeVideoAfterPrepare = true;
+    state.extraPlayClickAt = 0;
     if (state.metrics) state.metrics[reason === 'tail' ? 'tailWaits' : 'bufferWaits']++;
-    state.video.pause();
+    pauseVideoProgrammatically();
     setStatus(reason === 'tail' ? 'finishing speech' : 'buffering');
+    renderPlaybackStateUi();
   }
 
   function finishPlaybackHold() {
@@ -970,6 +1052,7 @@
       state.metrics.bufferWaitMs += Date.now() - state.playbackHold.startedAt;
     }
     state.playbackHold = null;
+    state.extraPlayClickAt = 0;
   }
 
   function stopCurrentAudio() {
@@ -1086,7 +1169,9 @@
     }
 
     state.preparingChunks = true;
+    state.prepareBatchStartedAt = Date.now();
     setStatus(state.prepared.length ? "buffering" : "backend");
+    renderPlaybackStateUi();
     updateMeta(
       state.videoId,
       `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
@@ -1158,7 +1243,11 @@
       );
       return validPrepared.length;
     } finally {
-      if (state.sessionId === sessionId) state.preparingChunks = false;
+      if (state.sessionId === sessionId) {
+        state.preparingChunks = false;
+        state.prepareBatchStartedAt = 0;
+        renderPlaybackStateUi();
+      }
       if (isActiveSession(sessionId)) {
         setTimeout(() => { if (isActiveSession(sessionId)) maybePrepareMoreAudio(getVideoTime(), "after-prepare"); }, 0);
       }
@@ -1171,13 +1260,10 @@
       return;
     }
     state.resumeVideoAfterPrepare = false;
+    state.lastResumedAt = Date.now();
     applyOriginalVolume();
-    const playPromise = state.video.play();
-    if (playPromise && typeof playPromise.catch === "function") {
-      playPromise.catch((error) => {
-        if (!isInterruptedPlay(error)) console.warn("[YouTube Live Dub MVP] Could not resume YouTube playback.", error);
-      });
-    }
+    playVideoProgrammatically();
+    renderPlaybackStateUi();
   }
 
   function hasStartBufferReady(videoTime) {
@@ -3492,9 +3578,18 @@
   function refreshPageState() {
     if (!hasRuntimeConnection()) markConnectionLost();
     if (state.connectionLost) return;
-    state.videoId = getVideoId();
+    const nextVideoId = getVideoId();
+    const previousVideoId = state.lastKnownVideoId;
+    if (nextVideoId && previousVideoId && nextVideoId !== previousVideoId) {
+      handleVideoTransition(nextVideoId);
+    } else if (nextVideoId && !previousVideoId) {
+      state.lastKnownVideoId = nextVideoId;
+    }
+    state.videoId = nextVideoId;
     state.video = document.querySelector("video.html5-main-video") || document.querySelector("video");
+    bindVideoEvents(state.video);
     resumeAfterRecovery();
+    maybeRunAutoContinue();
 
     if (!state.running && ["idle", "stopped"].includes(state.status)) {
       updateMeta(state.videoId || "unknown", "not loaded", "none");
@@ -3549,19 +3644,37 @@
   }
 
   function handleNavigation() {
+    const nextVideoId = getVideoId();
+    handleVideoTransition(nextVideoId, { fromNavigationEvent: true });
+    setTimeout(refreshPageState, 750);
+  }
+
+  function handleVideoTransition(nextVideoId, options = {}) {
+    const previousVideoId = state.lastKnownVideoId;
+    const changedVideo = Boolean(nextVideoId && nextVideoId !== previousVideoId);
     if (state.running) {
-      stopDub({ resumeVideo: false });
+      stopDub({ resumeVideo: false, preserveAutoContinue: true });
     }
     state.lastError = "";
     setStatus("idle");
-    state.pagePlayerResponse = null;
-    state.pagePlayerResponseVideoId = "";
-    state.pageTranscriptEndpoint = null;
-    state.pageYoutubeConfig = null;
-    state.pageTranscriptSegments = [];
-    state.pageTranscriptVideoId = "";
-    installPageProbe();
-    setTimeout(refreshPageState, 750);
+    if (changedVideo || options.fromNavigationEvent) {
+      state.pagePlayerResponse = null;
+      state.pagePlayerResponseVideoId = "";
+      state.pageTranscriptEndpoint = null;
+      state.pageYoutubeConfig = null;
+      state.pageTranscriptSegments = [];
+      state.pageTranscriptVideoId = "";
+      installPageProbe();
+    }
+    if (nextVideoId) {
+      state.lastKnownVideoId = nextVideoId;
+    } else {
+      clearPendingAutoContinue();
+      state.lastKnownVideoId = "";
+    }
+    if (state.autoContinue && nextVideoId && changedVideo) {
+      queueAutoContinueForVideo(nextVideoId);
+    }
   }
 
   function getVideoId() {
@@ -3666,8 +3779,24 @@
   function setStatus(status) {
     if (state.connectionLost) status = "연결 복구 필요";
     state.status = status;
-    els.status.textContent = status;
+    const labels = {
+      idle: "대기",
+      captions: "자막 확인 중",
+      stt: "음성 인식 중",
+      backend: "첫 더빙 준비 중",
+      buffering: "더빙 준비 중",
+      "finishing speech": "문장 마무리 중",
+      ready: "더빙 활성",
+      paused: "일시정지됨",
+      stopped: "정지됨",
+      testing: "연결 확인 중",
+      "backend ok": "연결 정상",
+      "no video": "영상 없음",
+      error: "오류",
+    };
+    if (els.status) els.status.textContent = labels[status] || status;
     renderAlert();
+    renderPlaybackStateUi();
   }
 
   function updateMeta(video, captions, audio) {
@@ -3679,7 +3808,508 @@
     renderAlert();
   }
 
+  function pauseVideoProgrammatically() {
+    if (!state.video || state.video.paused) return;
+    state.lastProgrammaticPauseAt = Date.now();
+    state.video.pause();
+  }
+
+  function playVideoProgrammatically() {
+    if (!state.video) return;
+    state.lastProgrammaticPlayAt = Date.now();
+    const playPromise = state.video.play();
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch((error) => {
+        if (!isInterruptedPlay(error)) console.warn("[YouTube Live Dub MVP] Could not resume YouTube playback.", error);
+      });
+    }
+  }
+
+  function bindVideoEvents(video) {
+    if (!video || state.boundVideo === video || typeof video.addEventListener !== "function") return;
+    state.boundVideo = video;
+    video.addEventListener("play", () => handleVideoInteractionEvents("play"));
+    video.addEventListener("pause", () => handleVideoInteractionEvents("pause"));
+    video.addEventListener("seeking", () => handleVideoInteractionEvents("seeking"));
+    video.addEventListener("seeked", () => handleVideoInteractionEvents("seeked"));
+  }
+
+  function handleVideoInteractionEvents(type) {
+    if (!state.running || !state.video || state.captureProcessing) return;
+    const now = Date.now();
+    if (type === "seeking" || type === "seeked") {
+      state.lastUserSeekAt = now;
+      state.lastSeekTargetTime = getVideoTime();
+      syncAudioToVideo();
+      renderPlaybackStateUi();
+      return;
+    }
+    if (type === "play") {
+      if (now - state.lastProgrammaticPlayAt <= 250) {
+        renderPlaybackStateUi();
+        return;
+      }
+      if (state.playbackHold || state.startupPreparing) {
+        state.extraPlayClickAt = now;
+        pauseVideoProgrammatically();
+        renderPlaybackStateUi();
+        return;
+      }
+      state.userPlayConfirmedAt = now;
+      state.lastResumedAt = now;
+      if (state.status === "paused") setStatus("ready");
+      syncAudioToVideo();
+      renderPlaybackStateUi();
+      return;
+    }
+    if (type === "pause") {
+      if (now - state.lastProgrammaticPauseAt <= 250 || state.video.ended) {
+        renderPlaybackStateUi();
+        return;
+      }
+      if (!state.playbackHold && !state.startupPreparing) {
+        state.resumeVideoAfterPrepare = false;
+        if (state.currentAudio && !state.currentAudio.paused) pauseDubAudio(state.currentAudio);
+        setStatus("paused");
+      }
+      renderPlaybackStateUi();
+    }
+  }
+
+  function cancelPlaybackHoldToUserPause() {
+    if (!state.running || !state.video) return;
+    finishPlaybackHold();
+    state.resumeVideoAfterPrepare = false;
+    state.extraPlayClickAt = 0;
+    stopCurrentAudio();
+    pauseVideoProgrammatically();
+    setStatus("paused");
+    renderPlaybackStateUi();
+  }
+
+  function resumeFromUserPause() {
+    if (!state.running || !state.video) return;
+    state.userPlayConfirmedAt = Date.now();
+    state.lastResumedAt = Date.now();
+    state.extraPlayClickAt = 0;
+    if (state.status === "paused") setStatus("ready");
+    playVideoProgrammatically();
+    syncAudioToVideo();
+    renderPlaybackStateUi();
+  }
+
+  function pauseFromUserControl() {
+    if (!state.running || !state.video) return;
+    finishPlaybackHold();
+    state.resumeVideoAfterPrepare = false;
+    state.extraPlayClickAt = 0;
+    if (state.currentAudio && !state.currentAudio.paused) pauseDubAudio(state.currentAudio);
+    pauseVideoProgrammatically();
+    setStatus("paused");
+    renderPlaybackStateUi();
+  }
+
+  function getSavedAutoContinue() {
+    try {
+      return window.localStorage.getItem(AUTO_CONTINUE_STORAGE_KEY) === "true";
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function saveAutoContinue(enabled) {
+    try {
+      window.localStorage.setItem(AUTO_CONTINUE_STORAGE_KEY, enabled ? "true" : "false");
+    } catch (_error) {}
+  }
+
+  function saveAutoContinueSessionVideo(videoId) {
+    try {
+      if (state.autoContinue && videoId) {
+        window.sessionStorage.setItem(AUTO_CONTINUE_SESSION_KEY, String(videoId));
+      }
+    } catch (_error) {}
+  }
+
+  function renderAutoContinueControls() {
+    const enabled = Boolean(state.autoContinue);
+    if (els.autoContinue) {
+      els.autoContinue.setAttribute("aria-checked", String(enabled));
+      els.autoContinue.classList?.toggle("yld-is-on", enabled);
+    }
+    if (els.autoContinueHint) {
+      els.autoContinueHint.textContent = enabled
+        ? "켜짐 · 다음 영상 전환 시 자동으로 더빙 시작"
+        : "꺼짐 · 영상마다 직접 Start를 누릅니다";
+    }
+    if (els.autoContinuePill) {
+      els.autoContinuePill.textContent = enabled ? "ON" : "OFF";
+    }
+    if (!state.connectionLost && els.start) {
+      els.start.textContent = enabled ? "Start · 연속" : "Start";
+    }
+  }
+
+  function clearPendingAutoContinue() {
+    state.pendingAutoContinue = null;
+    if (state.autoContinueTimer) {
+      clearInterval(state.autoContinueTimer);
+      state.autoContinueTimer = null;
+    }
+  }
+
+  function isVideoAdShowing() {
+    if (state.video?.closest?.(".ad-showing")) return true;
+    if (typeof document !== "undefined" && typeof document.querySelector === "function") {
+      return Boolean(document.querySelector("#movie_player.ad-showing"));
+    }
+    return false;
+  }
+
+  function queueAutoContinueForVideo(videoId, options = {}) {
+    if (!state.autoContinue || !videoId) return;
+    if (!options.force && state.queuedAutoVideoId === videoId && (state.running || state.pendingAutoContinue?.videoId === videoId)) {
+      return;
+    }
+    clearPendingAutoContinue();
+    state.queuedAutoVideoId = videoId;
+    state.pendingAutoContinue = {
+      videoId,
+      armedAt: Date.now(),
+      minDelayMs: options.immediate ? 0 : 650,
+    };
+    state.autoContinueTimer = setInterval(() => {
+      maybeRunAutoContinue();
+      renderPlaybackStateUi();
+    }, 350);
+    state.autoContinueTimer?.unref?.();
+    renderPlaybackStateUi();
+    if (options.immediate) {
+      maybeRunAutoContinue();
+    }
+  }
+
+  function maybeRunAutoContinue(now = Date.now()) {
+    const pending = state.pendingAutoContinue;
+    if (!pending) return false;
+    if (!state.autoContinue || state.connectionLost || state.running) {
+      clearPendingAutoContinue();
+      return false;
+    }
+    const currentVideoId = getVideoId() || state.videoId;
+    if (!currentVideoId || currentVideoId !== pending.videoId) {
+      if (now - pending.armedAt > 15000) clearPendingAutoContinue();
+      return false;
+    }
+    if (now - pending.armedAt > 90000) {
+      clearPendingAutoContinue();
+      return false;
+    }
+    if (now - pending.armedAt < (pending.minDelayMs ?? 650)) {
+      return false;
+    }
+    if (!state.video && typeof document !== "undefined" && typeof document.querySelector === "function") {
+      state.video = document.querySelector("video.html5-main-video") || document.querySelector("video");
+      bindVideoEvents(state.video);
+    }
+    if (!state.video) return false;
+    const readyState = state.video.readyState ?? 1;
+    const duration = state.video.duration ?? 10;
+    if (readyState < 1 || !Number.isFinite(duration) || duration <= 0) {
+      return false;
+    }
+    if (isVideoAdShowing()) {
+      return false;
+    }
+    clearPendingAutoContinue();
+    state.videoId = currentVideoId;
+    state.lastKnownVideoId = currentVideoId;
+    saveAutoContinueSessionVideo(currentVideoId);
+    void startDub({ recover: false });
+    return true;
+  }
+
+  function maybeResumeContinuousSessionOnLoad() {
+    if (!state.autoContinue || state.recoveryResume) return;
+    const currentVideoId = getVideoId();
+    if (!currentVideoId) return;
+    try {
+      const previousSessionVideo = window.sessionStorage.getItem(AUTO_CONTINUE_SESSION_KEY) || "";
+      if (previousSessionVideo && previousSessionVideo !== currentVideoId) {
+        queueAutoContinueForVideo(currentVideoId);
+      }
+    } catch (_error) {}
+  }
+
+  function setAutoContinue(enabled, options = {}) {
+    const next = Boolean(enabled);
+    state.autoContinue = next;
+    saveAutoContinue(next);
+    renderAutoContinueControls();
+    if (!next) {
+      clearPendingAutoContinue();
+      state.queuedAutoVideoId = "";
+      try { window.sessionStorage.removeItem(AUTO_CONTINUE_SESSION_KEY); } catch (_error) {}
+      renderPlaybackStateUi();
+      return;
+    }
+    const currentVideoId = getVideoId() || state.videoId;
+    saveAutoContinueSessionVideo(currentVideoId || "armed");
+    if (options.startCurrent !== false && currentVideoId && !state.running && !state.connectionLost && !els.start?.disabled) {
+      if (isVideoAdShowing()) {
+        queueAutoContinueForVideo(currentVideoId, { force: true });
+      } else {
+        state.queuedAutoVideoId = currentVideoId;
+        void startDub({ recover: false });
+      }
+    } else if (state.running && currentVideoId) {
+      state.queuedAutoVideoId = currentVideoId;
+    }
+    renderPlaybackStateUi();
+  }
+
+  function toggleAutoContinue(options = {}) {
+    setAutoContinue(!state.autoContinue, options);
+  }
+
+  function handlePlaybackBannerAction() {
+    const ui = computePlaybackUiState();
+    if (ui.actionKind === "pause-hold") cancelPlaybackHoldToUserPause();
+    else if (ui.actionKind === "resume") resumeFromUserPause();
+    else if (ui.actionKind === "pause") pauseFromUserControl();
+    else if (ui.actionKind === "disable-auto-continue") setAutoContinue(false);
+  }
+
+  function estimatedPrepareDurationMs() {
+    const mode = els.panel?.dataset?.mode || "local";
+    const fallbackMs = mode === "local" ? 2600 : mode === "gpt-local" ? 3400 : 4400;
+    const recent = Number(state.metrics?.lastPrepareMs) || 0;
+    const base = recent >= 400 ? Math.round(recent * 1.05) : fallbackMs;
+    return Math.max(1500, Math.min(12000, base));
+  }
+
+  function computePlaybackUiState(now = Date.now()) {
+    if (!state.running && state.pendingAutoContinue && state.autoContinue) {
+      const adShowing = isVideoAdShowing();
+      return {
+        visible: true,
+        tone: "preparing",
+        title: adShowing ? "🔁 광고 종료 후 자동으로 더빙 시작" : "🔁 다음 영상 더빙 자동 시작 중…",
+        detail: adShowing
+          ? "연속 더빙 켜짐 · 광고가 끝나면 자동으로 더빙을 준비합니다"
+          : "연속 더빙 켜짐 · 새 영상 자막과 음성을 준비합니다",
+        progress: adShowing ? null : 35,
+        actionLabel: "연속 끄기",
+        actionKind: "disable-auto-continue",
+        compact: false,
+      };
+    }
+    if (!state.running || !state.video) {
+      return { visible: false, tone: "idle", title: "", detail: "", progress: null, actionLabel: "", actionKind: "", compact: false };
+    }
+    const videoTime = getVideoTime();
+    const recentSeek = state.lastUserSeekAt > 0 && now - state.lastUserSeekAt < 6000;
+    const posLabel = formatTime(videoTime);
+
+    if (state.captureProcessing) {
+      return {
+        visible: true,
+        tone: "preparing",
+        title: `⏳ 원음 인식 중 (${posLabel}) · 준비 후 자동 재생`,
+        detail: "현재 구간 음성을 인식하고 있습니다 — 재생 버튼을 다시 누르지 마세요",
+        progress: 65,
+        actionLabel: "❚❚ 일시정지 유지",
+        actionKind: "pause-hold",
+        compact: false,
+      };
+    }
+
+    if (state.startupPreparing && state.resumeVideoAfterPrepare) {
+      const startedAt = state.prepareBatchStartedAt || state.startupStartedAt || now;
+      const budgetMs = estimatedPrepareDurationMs() + (state.prepareBatchStartedAt ? 0 : 1400);
+      const elapsedMs = Math.max(0, now - startedAt);
+      const remSec = Math.ceil((budgetMs - elapsedMs) / 1000);
+      const title = remSec >= 1
+        ? `⏳ 첫 더빙 준비 중 · 약 ${remSec}초 후 자동 재생`
+        : `⏳ 첫 더빙 마무리 중 · 곧 자동 재생 (${Math.max(1, Math.round(elapsedMs / 1000))}초)`;
+      const extraClick = state.extraPlayClickAt > 0 && now - state.extraPlayClickAt < 2800;
+      return {
+        visible: true,
+        tone: "preparing",
+        title,
+        detail: extraClick
+          ? "✓ 이미 자동 재생이 예약되어 있습니다 — 잠시만 기다려 주세요"
+          : "✓ 재생 대기 상태입니다 — 재생 버튼을 다시 누르지 마세요",
+        progress: Math.max(8, Math.min(94, Math.round((elapsedMs / budgetMs) * 100))),
+        actionLabel: "❚❚ 일시정지 유지",
+        actionKind: "pause-hold",
+        compact: false,
+      };
+    }
+
+    if (state.playbackHold?.reason === "tail") {
+      const audio = state.currentAudio;
+      const rate = audio?.playbackRate || 1;
+      const rem = audio && Number.isFinite(audio.duration)
+        ? Math.max(0.1, (audio.duration - audio.currentTime) / rate)
+        : 0.5;
+      const total = audio && Number.isFinite(audio.duration) && audio.duration > 0
+        ? Math.max(10, Math.min(96, Math.round((audio.currentTime / audio.duration) * 100)))
+        : 80;
+      return {
+        visible: true,
+        tone: "tail",
+        title: `🔊 문장 마무리 중 · ${rem.toFixed(1)}초 후 자동 진행`,
+        detail: "문장을 끝까지 읽은 뒤 영상이 자동으로 이어집니다",
+        progress: total,
+        actionLabel: "❚❚ 일시정지 유지",
+        actionKind: "pause-hold",
+        compact: false,
+      };
+    }
+
+    if (state.playbackHold) {
+      const startedAt = state.prepareBatchStartedAt || state.playbackHold.startedAt || now;
+      const budgetMs = estimatedPrepareDurationMs();
+      const elapsedMs = Math.max(0, now - startedAt);
+      const remSec = Math.ceil((budgetMs - elapsedMs) / 1000);
+      const prefix = recentSeek ? `이동 구간(${posLabel}) 준비 중` : "더빙 준비 중";
+      const title = remSec >= 1
+        ? `⏳ ${prefix} · 약 ${remSec}초 후 자동 재생`
+        : `⏳ ${prefix} · 곧 자동 재생 (${Math.max(1, Math.round(elapsedMs / 1000))}초)`;
+      const extraClick = state.extraPlayClickAt > 0 && now - state.extraPlayClickAt < 2800;
+      return {
+        visible: true,
+        tone: "preparing",
+        title,
+        detail: extraClick
+          ? "✓ 이미 자동 재생이 예약되어 있습니다 — 다시 누르지 마세요"
+          : "✓ 재생 입력 확인됨 — 준비 완료 즉시 자동으로 재생됩니다",
+        progress: Math.max(8, Math.min(94, Math.round((elapsedMs / budgetMs) * 100))),
+        actionLabel: "❚❚ 일시정지 유지",
+        actionKind: "pause-hold",
+        compact: false,
+      };
+    }
+
+    if (state.video.paused && !state.video.ended) {
+      const currentReady = state.prepared.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
+      const noCaptionNow = !hasDubbedCaptionAt(videoTime);
+      const readyHere = currentReady || (noCaptionNow && (!state.chunks.length || isTranscriptKnownAt(videoTime) || !state.transcriptWindows.length));
+      const detail = (state.preparingChunks || state.transcriptExpanding) && !currentReady
+        ? `이동 위치(${posLabel}) 더빙 미리 준비 중… · 재생(▶) 1회 클릭 시 준비 후 시작`
+        : recentSeek && readyHere
+          ? `이동 위치(${posLabel}) 더빙 준비 완료 ✓ · 재생(▶) 1회 클릭 시 즉시 시작`
+          : `정지 상태 (${posLabel}) · 재생(▶)을 한 번만 누르면 이어집니다`;
+      return {
+        visible: true,
+        tone: "paused",
+        title: "❚❚ 더빙 일시정지됨",
+        detail,
+        progress: null,
+        actionLabel: "▶ 이어서 재생",
+        actionKind: "resume",
+        compact: false,
+      };
+    }
+
+    const justResumed = state.lastResumedAt > 0 && now - state.lastResumedAt < 2400;
+    const activeClip = state.currentChunkIndex >= 0 ? `클립 ${state.currentChunkIndex + 1}/${state.chunks.length}` : "대사 대기";
+    return {
+      visible: true,
+      tone: "playing",
+      title: justResumed ? "▶ 더빙 재생 시작됨" : "● 더빙 재생 중",
+      detail: `${activeClip} · 위치 ${posLabel}`,
+      progress: null,
+      actionLabel: "❚❚ 일시정지",
+      actionKind: "pause",
+      compact: !justResumed,
+    };
+  }
+
+  function ensureVideoHud() {
+    if (typeof document === "undefined") return null;
+    const host = document.querySelector("#movie_player") || state.video?.parentElement;
+    if (!host) return null;
+    let hud = document.getElementById(VIDEO_HUD_ID);
+    if (!hud) {
+      hud = document.createElement("div");
+      hud.id = VIDEO_HUD_ID;
+      hud.hidden = true;
+      hud.innerHTML = `
+        <div class="yld-hud-row">
+          <span class="yld-hud-title" data-yld-hud-title></span>
+          <button class="yld-hud-action" type="button" data-yld-hud-action hidden></button>
+        </div>
+        <div class="yld-hud-detail" data-yld-hud-detail></div>
+        <div class="yld-hud-progress" data-yld-hud-progress hidden>
+          <div class="yld-hud-progress-fill" data-yld-hud-progress-fill></div>
+        </div>
+      `;
+      const btn = hud.querySelector("[data-yld-hud-action]");
+      btn?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        handlePlaybackBannerAction();
+      });
+      btn?.addEventListener("pointerdown", (event) => event.stopPropagation());
+      btn?.addEventListener("dblclick", (event) => event.stopPropagation());
+    }
+    if (hud.parentElement !== host) {
+      host.appendChild(hud);
+    }
+    els.videoHud = hud;
+    els.hudTitle = hud.querySelector("[data-yld-hud-title]");
+    els.hudDetail = hud.querySelector("[data-yld-hud-detail]");
+    els.hudAction = hud.querySelector("[data-yld-hud-action]");
+    els.hudProgress = hud.querySelector("[data-yld-hud-progress]");
+    els.hudProgressFill = hud.querySelector("[data-yld-hud-progress-fill]");
+    return hud;
+  }
+
+  function renderPlaybackStateUi() {
+    const ui = computePlaybackUiState();
+    if (els.stateBanner) {
+      els.stateBanner.hidden = !ui.visible;
+      if (ui.visible) {
+        els.stateBanner.dataset.tone = ui.tone;
+        if (els.stateTitle) els.stateTitle.textContent = ui.title;
+        if (els.stateDetail) els.stateDetail.textContent = ui.detail;
+        if (els.stateAction) {
+          els.stateAction.hidden = !ui.actionLabel;
+          els.stateAction.textContent = ui.actionLabel;
+        }
+        if (els.stateProgress && els.stateProgressFill) {
+          els.stateProgress.hidden = ui.progress === null;
+          if (ui.progress !== null) els.stateProgressFill.style.width = `${ui.progress}%`;
+        }
+      }
+    }
+    const hud = ui.visible ? ensureVideoHud() : els.videoHud;
+    if (!hud) return;
+    hud.hidden = !ui.visible;
+    if (!ui.visible) return;
+    hud.dataset.tone = ui.tone;
+    hud.classList.toggle("yld-hud-compact", Boolean(ui.compact));
+    if (els.hudTitle) els.hudTitle.textContent = ui.title;
+    if (els.hudDetail) {
+      els.hudDetail.hidden = Boolean(ui.compact);
+      els.hudDetail.textContent = ui.detail;
+    }
+    if (els.hudAction) {
+      const showHudAction = Boolean(ui.actionLabel) && !ui.compact;
+      els.hudAction.hidden = !showHudAction;
+      if (showHudAction) els.hudAction.textContent = ui.actionLabel;
+    }
+    if (els.hudProgress && els.hudProgressFill) {
+      const showBar = ui.progress !== null && !ui.compact;
+      els.hudProgress.hidden = !showBar;
+      if (showBar) els.hudProgressFill.style.width = `${ui.progress}%`;
+    }
+  }
+
   function renderPlaybackDiagnostics() {
+    renderPlaybackStateUi();
     if (!els.diagnostics) return;
     const video = state.video;
     const audio = state.currentAudio || state.testAudio;

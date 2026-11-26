@@ -103,8 +103,9 @@ async function contentFixture(overrides = {}) {
   const video = { currentTime: 0, volume: 0.8, muted: false, paused: false, ended: false, playbackRate: 1, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } };
   const context = vm.createContext({ chrome: {runtime: {id:"fixture"}}, window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
   const injection = `
-    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments };
-    state.videoId = 'abcdefghijk'; state.video = video;
+    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue };
+    state.videoId = 'abcdefghijk'; state.lastKnownVideoId = 'abcdefghijk'; state.video = video;
+    if (overrides.videoIdFn) getVideoId = overrides.videoIdFn;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
     els.panel = {dataset:{mode:'local'}};
     els.volume.value='35'; els.ttsProvider.value='windows-sapi';
@@ -769,4 +770,147 @@ test('expanded STT windows trim cross-boundary overlap instead of colliding mid-
   assert.equal(f.state.sourceSegments.length, 2);
   assert.equal(f.state.sourceSegments[1].start, 168.3);
   assert.equal(f.state.sourceSegments[1].end, 169.5);
+});
+
+test('playback state UI distinguishes user pause, seek-while-paused, auto-resume countdown, and extra Play clicks', async () => {
+  const f = await contentFixture();
+  const firstAudio = fakeSpeech(4);
+  f.state.running = true;
+  f.state.chunks = [
+    { index: 0, start: 0, end: 5, text: 'first' },
+    { index: 1, start: 60, end: 65, text: 'after seek' },
+  ];
+  f.state.sourceSegments = f.state.chunks;
+  f.state.prepared = [{ chunkIndex: 0, start: 0, end: 5, ttsModel: 'supertonic-3', audio: firstAudio }];
+  f.state.preparedChunkIndexes = new Set([0]);
+
+  // 1) Normal playback shows playing state; after 2.5s settles into compact pill.
+  f.video.currentTime = 1;
+  f.state.lastResumedAt = 1000;
+  f.syncAudioToVideo();
+  assert.equal(f.computePlaybackUiState(1500).tone, 'playing');
+  assert.match(f.computePlaybackUiState(1500).title, /더빙 재생 시작됨/);
+  assert.equal(f.computePlaybackUiState(5000).compact, true);
+  assert.match(f.computePlaybackUiState(5000).title, /더빙 재생 중/);
+
+  // 2) User pauses video -> immediately shows paused state with resume guidance.
+  f.video.paused = true;
+  f.handleVideoInteractionEvents('pause');
+  let ui = f.computePlaybackUiState();
+  assert.equal(ui.tone, 'paused');
+  assert.match(ui.title, /일시정지됨/);
+  assert.equal(ui.actionKind, 'resume');
+
+  // 3) User seeks forward to 01:01 while paused -> stays paused and indicates background preparation.
+  f.video.currentTime = 61;
+  f.state.preparingChunks = true;
+  f.handleVideoInteractionEvents('seeked');
+  ui = f.computePlaybackUiState();
+  assert.equal(f.video.paused, true);
+  assert.equal(ui.tone, 'paused');
+  assert.match(ui.detail, /1:01.*미리 준비 중/);
+
+  // 4) User clicks Play ONCE before 1:01 finishes preparing -> immediately shows countdown & auto-play confirmation.
+  f.video.paused = false;
+  f.state.prepareBatchStartedAt = Date.now() - 600;
+  f.handleVideoInteractionEvents('play');
+  assert.equal(f.video.paused, true);
+  assert.equal(f.state.playbackHold.reason, 'buffer');
+  ui = f.computePlaybackUiState();
+  assert.equal(ui.tone, 'preparing');
+  assert.match(ui.title, /1:01.*약 \d+초 후 자동 재생/);
+  assert.match(ui.detail, /재생 입력 확인됨/);
+
+  // 5) Clicking Play a second time during buffer hold keeps auto-resume intact and reassures user.
+  f.video.paused = false;
+  f.handleVideoInteractionEvents('play');
+  assert.equal(f.video.paused, true);
+  assert.equal(f.state.resumeVideoAfterPrepare, true);
+  assert.match(f.computePlaybackUiState().detail, /이미 자동 재생이 예약/);
+
+  // 6) Explicit '일시정지 유지' cancels auto-resume cleanly so user stays paused even after audio arrives.
+  f.cancelPlaybackHoldToUserPause();
+  assert.equal(f.state.playbackHold, null);
+  assert.equal(f.state.resumeVideoAfterPrepare, false);
+  assert.equal(f.computePlaybackUiState().tone, 'paused');
+  f.state.preparingChunks = false;
+  const secondAudio = fakeSpeech(4);
+  f.state.prepared.push({ chunkIndex: 1, start: 60, end: 65, ttsModel: 'supertonic-3', audio: secondAudio });
+  f.state.preparedChunkIndexes.add(1);
+  f.syncAudioToVideo();
+  assert.equal(f.video.paused, true);
+  assert.match(f.computePlaybackUiState().detail, /준비 완료 ✓/);
+
+  // 7) Clicking '이어서 재생' now starts immediately.
+  f.resumeFromUserPause();
+  assert.equal(f.video.paused, false);
+  assert.equal(f.computePlaybackUiState().tone, 'playing');
+
+  // 8) Sentence tail hold shows exact remaining seconds.
+  secondAudio.currentTime = 3.1;
+  f.state.playbackHold = { reason: 'tail', startedAt: Date.now() };
+  ui = f.computePlaybackUiState();
+  assert.equal(ui.tone, 'tail');
+  assert.match(ui.title, /0\.9초 후 자동 진행/);
+  f.stopDub();
+});
+
+test('continuous next-video toggle starts current dub, auto-continues after pre-roll ads on next video, and stops auto-starting when toggled off', async () => {
+  let currentId = 'video111111';
+  let adActive = false;
+  const startedVideos = [];
+  const f = await contentFixture({
+    videoIdFn: () => currentId,
+    audio: fakeSpeech(3),
+    prepare: async (payload) => {
+      startedVideos.push(payload.videoId);
+      return { segments: [{ index: 0, start: 0, end: 4, audioDataUrl: 'data:audio/wav;base64,AA==' }] };
+    },
+  });
+  f.video.readyState = 2;
+  f.video.duration = 120;
+  f.video.closest = (sel) => (sel === '.ad-showing' && adActive ? {} : null);
+  f.state.videoId = currentId;
+  f.state.lastKnownVideoId = currentId;
+
+  // 1) Toggling continuous mode ON while idle on a watch page starts dubbing immediately.
+  f.toggleAutoContinue();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.state.autoContinue, true);
+  assert.equal(f.state.running, true);
+  assert.deepEqual(startedVideos, ['video111111']);
+  assert.equal(f.els.start.textContent, 'Start · 연속');
+
+  // 2) Navigating to next video while ad is showing waits cleanly, then auto-starts once ad ends.
+  currentId = 'video222222';
+  f.state.videoId = currentId;
+  adActive = true;
+  f.handleVideoTransition('video222222', { fromNavigationEvent: true });
+  assert.equal(f.state.running, false);
+  assert.ok(f.state.pendingAutoContinue);
+  assert.match(f.computePlaybackUiState().title, /광고 종료 후 자동으로 더빙 시작/);
+  assert.equal(f.maybeRunAutoContinue(Date.now() + 1000), false);
+  assert.deepEqual(startedVideos, ['video111111']);
+
+  // Ad finishes -> next video starts dubbing automatically!
+  adActive = false;
+  assert.equal(f.maybeRunAutoContinue(Date.now() + 1000), true);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.state.running, true);
+  assert.deepEqual(startedVideos, ['video111111', 'video222222']);
+
+  // 3) Toggling continuous mode OFF keeps current video playing, but next video requires manual Start.
+  f.toggleAutoContinue();
+  assert.equal(f.state.autoContinue, false);
+  assert.equal(f.state.running, true);
+  assert.equal(f.els.start.textContent, 'Start');
+
+  currentId = 'video333333';
+  f.state.videoId = currentId;
+  f.handleVideoTransition('video333333', { fromNavigationEvent: true });
+  assert.equal(f.state.running, false);
+  assert.equal(f.state.pendingAutoContinue, null);
+  assert.equal(f.maybeRunAutoContinue(Date.now() + 2000), false);
+  assert.deepEqual(startedVideos, ['video111111', 'video222222']);
+  f.stopDub();
 });
