@@ -960,3 +960,35 @@ test('rolling lookahead batches up to 4 future clips with streaming and preserve
   assert.equal(f.state.chunks[1].start, 24.0);
   f.stopDub();
 });
+
+test('prepare requests report live bufferAhead queue depth and HUD marks HQ 2.1 clips', async () => {
+  let capturedBufferAhead = null;
+  const f = await contentFixture({
+    prepare: async payload => {
+      capturedBufferAhead = payload.bufferAhead;
+      return { segments: payload.segments.map(c => ({ ...c, ttsModel: 'gpt-realtime-2.1', audioUrl: 'hq.wav' })) };
+    },
+  });
+  f.state.running = true;
+  f.video.currentTime = 2;
+  f.video.paused = false;
+  f.state.chunks = Array.from({ length: 6 }, (_, i) => ({ index: i, start: i * 6, end: i * 6 + 5.5, text: `c${i}` }));
+  const a0 = { paused: false, currentTime: 2, duration: 5, pause() {} };
+  f.state.prepared = [
+    { chunkIndex: 0, start: 0, end: 5.5, ttsModel: 'gpt-realtime-2.1', audio: a0 },
+    { chunkIndex: 1, start: 6, end: 11.5, ttsModel: 'gpt-realtime-2.1-mini', audio: a0 },
+    { chunkIndex: 2, start: 12, end: 17.5, ttsModel: 'gpt-realtime-2.1-mini', audio: a0 },
+  ];
+  f.state.preparedChunkIndexes = new Set([0, 1, 2]);
+  f.state.currentChunkIndex = 0;
+  f.state.currentAudio = a0;
+
+  await f.prepareAndAppendChunks([f.state.chunks[3]]);
+  assert.deepEqual({ ...capturedBufferAhead }, { seconds: 15.5, clips: 3 });
+
+  const ui = f.computePlaybackUiState(Date.now());
+  assert.equal(ui.tone, 'playing');
+  assert.match(ui.title, /HQ 2\.1/);
+  assert.match(ui.detail, /HQ 2\.1/);
+  f.stopDub();
+});

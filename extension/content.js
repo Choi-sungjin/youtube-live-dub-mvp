@@ -6,7 +6,7 @@
 
   const PANEL_ID = "yld-panel";
   const VIDEO_HUD_ID = "yld-video-hud";
-  const BUILD_VERSION = "0.9.6";
+  const BUILD_VERSION = "0.9.7";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -1009,10 +1009,11 @@
         seekAudio(state.currentAudio, offset);
       }
       playAudio(state.currentAudio);
+      const hqLabel = item.ttsModel === "gpt-realtime-2.1" ? " [HQ 2.1]" : "";
       updateMeta(
         state.videoId,
         `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
-        formatAudioState(`playing clip ${item.chunkIndex + 1}/${state.chunks.length} @${state.currentAudio.playbackRate.toFixed(2)}x`, videoTime)
+        formatAudioState(`playing clip ${item.chunkIndex + 1}/${state.chunks.length}${hqLabel} @${state.currentAudio.playbackRate.toFixed(2)}x`, videoTime)
       );
       renderPlaybackStateUi();
       return;
@@ -1183,10 +1184,15 @@
     try {
       const prepareStarted = Date.now();
       const useStreaming = state.bufferedAudioSource || pending.length > 1;
+      const currentBuffer = getBufferInfo(getVideoTime());
       const response = await requestDubPrepare({
         backendUrl: els.backend.value,
         videoId: state.videoId,
         currentTime: getVideoTime(),
+        bufferAhead: {
+          seconds: roundTime(currentBuffer.readyAhead),
+          clips: currentBuffer.readyClipsAhead,
+        },
         source: state.bufferedAudioSource ? "youtube-buffered" : state.browserAudioSource ? "youtube-captured" : "youtube-timedtext",
         settings: dubbingSettingsFromControls(),
         segments: pending,
@@ -4294,11 +4300,13 @@
     }
 
     const justResumed = state.lastResumedAt > 0 && now - state.lastResumedAt < 2400;
-    const activeClip = state.currentChunkIndex >= 0 ? `클립 ${state.currentChunkIndex + 1}/${state.chunks.length}` : "대사 대기";
+    const playingItem = state.currentChunkIndex >= 0 ? state.prepared.find(item => item.chunkIndex === state.currentChunkIndex) : null;
+    const hqTag = playingItem?.ttsModel === "gpt-realtime-2.1" ? " · HQ 2.1" : "";
+    const activeClip = state.currentChunkIndex >= 0 ? `클립 ${state.currentChunkIndex + 1}/${state.chunks.length}${hqTag}` : "대사 대기";
     return {
       visible: true,
       tone: "playing",
-      title: justResumed ? "▶ 더빙 재생 시작됨" : "● 더빙 재생 중",
+      title: justResumed ? `▶ 더빙 재생 시작됨${hqTag}` : `● 더빙 재생 중${hqTag}`,
       detail: `${activeClip} · 위치 ${posLabel}`,
       progress: null,
       actionLabel: "❚❚ 일시정지",

@@ -5,6 +5,11 @@ export const OPENAI_TEXT_MODEL = 'gpt-6.2-sol';
 export const OPENAI_TEXT_MODELS = ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'];
 export const OPENAI_SERVICE_TIERS = ['', 'fast', 'ultrafast'];
 export const OPENAI_VOICE_MODEL = 'gpt-realtime-2.1-mini';
+export const OPENAI_HQ_VOICE_MODEL = 'gpt-realtime-2.1';
+export const OPENAI_VOICE_MODELS = [OPENAI_VOICE_MODEL, OPENAI_HQ_VOICE_MODEL];
+export const OPENAI_HQ_VOICE_PROBABILITY = 0.35;
+export const OPENAI_HQ_MIN_BUFFER_CLIPS = 2;
+export const OPENAI_HQ_MIN_BUFFER_SECONDS = 10;
 export const OPENAI_VOICE_SPEED = 1.1;
 export const OPENAI_VOICES = ['marin', 'cedar', 'coral', 'alloy'];
 
@@ -21,6 +26,29 @@ export function resolveOpenAiTextModel(settings = {}, env = process.env) {
 export function resolveOpenAiServiceTier(settings = {}, env = process.env) {
   const tier = String(settings?.openaiServiceTier ?? env.OPENAI_SERVICE_TIER ?? '').trim();
   return OPENAI_SERVICE_TIERS.includes(tier) ? tier : '';
+}
+
+export function resolveOpenAiVoiceModel(settings = {}, env = process.env) {
+  const candidate = String(settings?.ttsModel || env.OPENAI_VOICE_MODEL || OPENAI_VOICE_MODEL).trim();
+  return /^[A-Za-z0-9._:-]{1,80}$/.test(candidate) ? candidate : OPENAI_VOICE_MODEL;
+}
+
+export function shouldPromoteHqRealtimeVoice({
+  bufferAhead = null,
+  batchSize = 1,
+  segmentPosition = 0,
+  probability = Number(process.env.OPENAI_HQ_VOICE_PROBABILITY ?? OPENAI_HQ_VOICE_PROBABILITY),
+  random = Math.random,
+} = {}) {
+  const p = Number.isFinite(probability) ? Math.max(0, Math.min(1, probability)) : OPENAI_HQ_VOICE_PROBABILITY;
+  if (p <= 0) return false;
+  const hasBuffer = Boolean(bufferAhead && typeof bufferAhead === 'object');
+  const clips = Number(bufferAhead?.clips ?? 0);
+  const seconds = Number(bufferAhead?.seconds ?? 0);
+  const queueReady = hasBuffer
+    ? (clips >= OPENAI_HQ_MIN_BUFFER_CLIPS && seconds >= OPENAI_HQ_MIN_BUFFER_SECONDS)
+    : (batchSize >= 3 && segmentPosition >= 2);
+  return queueReady && random() < p;
 }
 
 function requireKey(apiKey) {
@@ -205,11 +233,11 @@ export function pcmWave(pcm) {
   return Buffer.concat([header, smoothed]);
 }
 
-export async function synthesizeOpenAISpeech({ text, settings, outputPath }, { apiKey = process.env.OPENAI_API_KEY, Socket = null, retryDelaysMs = OPENAI_RETRY_DELAYS_MS } = {}) {
+export async function synthesizeOpenAISpeech({ text, settings = {}, outputPath }, { apiKey = process.env.OPENAI_API_KEY, Socket = null, retryDelaysMs = OPENAI_RETRY_DELAYS_MS } = {}) {
   requireKey(apiKey);
   if (!text?.trim() || text.length > 5000) throw new Error('Speech text must contain 1–5000 characters.');
   const SocketClass = Socket || (await import('ws')).default;
-  const model = process.env.OPENAI_VOICE_MODEL || OPENAI_VOICE_MODEL;
+  const model = resolveOpenAiVoiceModel(settings);
   const voice = OPENAI_VOICES.includes(settings.voice) ? settings.voice : 'marin';
   const started = performance.now();
   const result = await withRetries(() => realtimeSpeech(SocketClass, { apiKey, model, voice, text, started }), retryDelaysMs, started);

@@ -1,6 +1,6 @@
 import { classifySpeaker, selectSpeakerVoice, speakerStatus, warmSpeaker, closeSpeaker, analyzeCapturedSpeakers } from './speaker-voices.js';
 import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
-import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_TEXT_MODELS, OPENAI_SERVICE_TIERS, OPENAI_VOICE_MODEL, OPENAI_VOICES, resolveOpenAiTextModel, resolveOpenAiServiceTier } from './openai-audio.js';
+import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_TEXT_MODELS, OPENAI_SERVICE_TIERS, OPENAI_VOICE_MODEL, OPENAI_HQ_VOICE_MODEL, OPENAI_HQ_VOICE_PROBABILITY, OPENAI_VOICES, resolveOpenAiTextModel, resolveOpenAiServiceTier, shouldPromoteHqRealtimeVoice } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
 import { synthesizeSupertonicSpeech, warmSupertonic, supertonicStatus, closeSupertonic } from './supertonic-speech.js';
 import { createDiskTextCache } from './disk-text-cache.js';
@@ -269,6 +269,8 @@ function providerInfo() {
     supertoneModel: process.env.SUPERTONE_MODEL || 'sona_speech_2_flash',
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
     openaiVoiceModel: process.env.OPENAI_VOICE_MODEL || OPENAI_VOICE_MODEL,
+    openaiHqVoiceModel: process.env.OPENAI_HQ_VOICE_MODEL || OPENAI_HQ_VOICE_MODEL,
+    openaiHqVoiceProbability: clamp(Number(process.env.OPENAI_HQ_VOICE_PROBABILITY ?? OPENAI_HQ_VOICE_PROBABILITY), 0, 1),
     supertoneConfigured: Boolean(process.env.SUPERTONE_API_KEY),
     defaultVoiceId: process.env.SUPERTONE_DEFAULT_VOICE_ID || SUPERTONE_VOICES.lowMale.id,
     voiceSettings: {
@@ -403,16 +405,55 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
 
     let clip = clipFor(speechSettings);
     let voiceFallback = '';
-    let result = await cachedClip(clip);
-    if (!result && speechSettings.ttsProvider === 'openai-realtime') {
-      ({ value: result, fallback: voiceFallback } = await preferOpenAI(
-        () => synthesizeClip(clip),
-        async () => {
-          clip = clipFor(localVoiceSettings(speechSettings));
-          return await cachedClip(clip) || synthesizeClip(clip);
-        }));
-    } else if (!result) {
-      result = await synthesizeClip(clip);
+    let result = null;
+    if (speechSettings.ttsProvider === 'openai-realtime' && typeof shouldPromoteHqRealtimeVoice === 'function') {
+      const hqModelName = process.env.OPENAI_HQ_VOICE_MODEL || OPENAI_HQ_VOICE_MODEL;
+      const hqClip = speechSettings.ttsModel === hqModelName
+        ? clip
+        : clipFor({ ...speechSettings, ttsModel: hqModelName });
+      result = await cachedClip(hqClip);
+      if (result) {
+        clip = hqClip;
+      } else if (hqClip !== clip) {
+        result = await cachedClip(clip);
+      }
+      if (!result) {
+        const promoteHq = hqClip !== clip && body?.source !== 'self-test' && shouldPromoteHqRealtimeVoice({
+          bufferAhead: body?.bufferAhead,
+          batchSize: limitedSegments.length,
+          segmentPosition: segmentPos,
+        });
+        ({ value: result, fallback: voiceFallback } = await preferOpenAI(
+          async () => {
+            if (promoteHq) {
+              try {
+                const hqResult = await synthesizeClip(hqClip);
+                clip = hqClip;
+                timings.hqVoiceClips = (timings.hqVoiceClips || 0) + 1;
+                return hqResult;
+              } catch (hqError) {
+                if (/invalid_api_key|HTTP 401|insufficient_quota/i.test(hqError?.message || '')) throw hqError;
+              }
+            }
+            return synthesizeClip(clip);
+          },
+          async () => {
+            clip = clipFor(localVoiceSettings(speechSettings));
+            return await cachedClip(clip) || synthesizeClip(clip);
+          }));
+      }
+    } else {
+      result = await cachedClip(clip);
+      if (!result && speechSettings.ttsProvider === 'openai-realtime') {
+        ({ value: result, fallback: voiceFallback } = await preferOpenAI(
+          () => synthesizeClip(clip),
+          async () => {
+            clip = clipFor(localVoiceSettings(speechSettings));
+            return await cachedClip(clip) || synthesizeClip(clip);
+          }));
+      } else if (!result) {
+        result = await synthesizeClip(clip);
+      }
     }
     const audioDuration = result.duration || sourceDuration;
     const translationFallback = translationFallbacks.get(segment.index) || '';

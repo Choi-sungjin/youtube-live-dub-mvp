@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { resolveDubbingMode } from '../backend/dubbing-modes.js';
-import { readResponseStream, translateOpenAI, synthesizeOpenAISpeech, pcmWave } from '../backend/openai-audio.js';
+import { readResponseStream, translateOpenAI, synthesizeOpenAISpeech, pcmWave, shouldPromoteHqRealtimeVoice } from '../backend/openai-audio.js';
 
 function stream(events, fragment = 7) {
   const data = Buffer.from(events.map(e => `data: ${JSON.stringify(e)}\r\n\r\n`).join(''));
@@ -248,4 +248,38 @@ test('GPT translation runs concurrently and emits completed segments before slow
   assert.equal(map.get(1), '번역-1');
   assert.equal(map.get(2), '번역-2');
   assert.equal(order.length, 3);
+});
+
+test('gpt-realtime-2.1 HQ promotion fires probabilistically only when buffer queue is gathered and connects to flagship model', async () => {
+  // Tight or startup buffer -> never promotes even with random() === 0
+  assert.equal(shouldPromoteHqRealtimeVoice({ bufferAhead: { clips: 0, seconds: 0 }, random: () => 0 }), false);
+  assert.equal(shouldPromoteHqRealtimeVoice({ bufferAhead: { clips: 1, seconds: 15 }, random: () => 0 }), false);
+  assert.equal(shouldPromoteHqRealtimeVoice({ bufferAhead: { clips: 3, seconds: 8 }, random: () => 0 }), false);
+
+  // Gathered buffer (>= 2 clips and >= 10s ahead) -> promotes according to probability
+  assert.equal(shouldPromoteHqRealtimeVoice({ bufferAhead: { clips: 2, seconds: 12 }, probability: 0.35, random: () => 0.2 }), true);
+  assert.equal(shouldPromoteHqRealtimeVoice({ bufferAhead: { clips: 2, seconds: 12 }, probability: 0.35, random: () => 0.5 }), false);
+
+  // Batch tail fallback without telemetry
+  assert.equal(shouldPromoteHqRealtimeVoice({ batchSize: 4, segmentPosition: 1, probability: 0.5, random: () => 0.1 }), false);
+  assert.equal(shouldPromoteHqRealtimeVoice({ batchSize: 4, segmentPosition: 2, probability: 0.5, random: () => 0.1 }), true);
+
+  // Verify synthesizeOpenAISpeech honors settings.ttsModel = 'gpt-realtime-2.1'
+  const dir = await mkdtemp(path.join(tmpdir(), 'yld-openai-hq-'));
+  try {
+    let seenUrl = '';
+    const BaseSocket = socketFixture('complete');
+    class HqSocket extends BaseSocket {
+      constructor(url, opts) { seenUrl = url; super(url, opts); }
+    }
+    const outputPath = path.join(dir, 'hq.wav');
+    const result = await synthesizeOpenAISpeech(
+      { text: '고품질 발음 테스트입니다.', settings: { voice: 'marin', ttsModel: 'gpt-realtime-2.1' }, outputPath },
+      { apiKey: 'test-only', Socket: HqSocket }
+    );
+    assert.match(seenUrl, /model=gpt-realtime-2\.1$/);
+    assert.equal(result.ttsModel, 'gpt-realtime-2.1');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
