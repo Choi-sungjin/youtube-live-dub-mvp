@@ -214,3 +214,27 @@ test('buffered media is trimmed with local-only ffmpeg and low-latency STT befor
     assert.deepEqual(await readdir(cacheDir),[]);
   } finally {await rm(cacheDir,{recursive:true,force:true});}
 });
+
+test('slow speaker timeline exceeding grace budget does not stall STT response and cleans up temp dir on completion', async () => {
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'yld-grace-test-'));
+  try {
+    let finishSpeaker;
+    const handler = createCaptureHandler({
+      cacheDir,
+      speakerGraceMs: 50,
+      transcribe: async () => ({ segments: [{ words: [{ start: 1, end: 2.5, word: ' Fast.' }] }], inferenceMs: 12 }),
+      analyzeSpeakers: () => new Promise(resolve => { finishSpeaker = resolve; }),
+    });
+    const started = performance.now();
+    const result = await handler(request({ ...body, end: 54, autoSpeaker: true }));
+    assert.ok(performance.now() - started < 500);
+    assert.equal(result.segments.length, 1);
+    assert.equal(result.segments[0].start, 51);
+    assert.equal(result.segments[0].end, 52.5);
+    assert.equal(result.segments[0].text, 'Fast.');
+    assert.equal(result.segments[0].speaker.label, 'unknown');
+    finishSpeaker({ turns: [] });
+    await new Promise(r => setTimeout(r, 20));
+    assert.deepEqual(await readdir(cacheDir), []);
+  } finally { await rm(cacheDir, { recursive: true, force: true }); }
+});

@@ -914,3 +914,49 @@ test('continuous next-video toggle starts current dub, auto-continues after pre-
   assert.deepEqual(startedVideos, ['video111111', 'video222222']);
   f.stopDub();
 });
+
+test('rolling lookahead batches up to 4 future clips with streaming and preserves playing chunks across window expansions', async () => {
+  const requests = [];
+  let streamedCallback = null;
+  const f = await contentFixture({
+    expand: async () => true,
+    prepare: async (payload, onSegment) => {
+      requests.push(payload.segments.map(c => c.index));
+      streamedCallback = onSegment;
+      return { segments: payload.segments.map(c => ({ ...c, audioUrl: 'fixture.wav' })) };
+    },
+  });
+  f.state.running = true;
+  f.video.currentTime = 1.0;
+  f.state.chunks = Array.from({ length: 8 }, (_, index) => ({ index, start: index * 3, end: index * 3 + 2.8, text: `s${index}` }));
+  const playingAudio = { paused: false, currentTime: 1.0, duration: 2.5, pause() { this.paused = true; } };
+  f.state.prepared = [{ chunkIndex: 0, start: 0, end: 2.8, audio: playingAudio }];
+  f.state.preparedChunkIndexes = new Set([0]);
+  f.state.currentChunkIndex = 0;
+  f.state.currentAudio = playingAudio;
+
+  // Current clip (0) is already covered -> rolling lookahead batches 4 future clips (1..4) with NDJSON streaming
+  f.maybePrepareMoreAudio(1.0, 'timer');
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(Array.from(requests[0]), [1, 2, 3, 4]);
+  assert.equal(typeof streamedCallback, 'function');
+
+  // Window seam expansion: a short prepared/playing tail chunk [22.8..24.0] must NOT merge with [24.0..25.2] and cut off audio
+  f.state.sourceSegments = [{ start: 22.8, end: 24.0, text: 'Then the robot' }];
+  f.state.chunks = [{ index: 6, start: 22.8, end: 24.0, text: 'Then the robot', segments: f.state.sourceSegments }];
+  f.state.prepared = [{ chunkIndex: 6, start: 22.8, end: 24.0, audio: playingAudio }];
+  f.state.preparedChunkIndexes = new Set([6]);
+  f.state.currentChunkIndex = 6;
+  f.state.currentAudio = playingAudio;
+  f.video.currentTime = 23.2;
+
+  const expanded = f.maybeInstallExpandedSegments([{ start: 24.0, end: 25.2, text: 'picks it up.' }]);
+  assert.equal(expanded, true);
+  assert.equal(playingAudio.paused, false);
+  assert.equal(f.state.currentAudio, playingAudio);
+  assert.equal(f.state.prepared.length, 1);
+  assert.equal(f.state.chunks.length, 2);
+  assert.equal(f.state.chunks[0].index, 6);
+  assert.equal(f.state.chunks[1].start, 24.0);
+  f.stopDub();
+});

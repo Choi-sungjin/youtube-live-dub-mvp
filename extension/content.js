@@ -6,7 +6,7 @@
 
   const PANEL_ID = "yld-panel";
   const VIDEO_HUD_ID = "yld-video-hud";
-  const BUILD_VERSION = "0.9.5";
+  const BUILD_VERSION = "0.9.6";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -16,7 +16,8 @@
   const PREPARE_LEAD_SECONDS = 0.18;
   const BUFFER_WINDOW_SECONDS = 90;
   const NEXT_BUFFER_THRESHOLD_SECONDS = 60;
-  const MAX_PREPARE_CHUNKS = 1;
+  const MAX_PREPARE_CHUNKS = 4;
+  const IMMEDIATE_PREPARE_CHUNKS = 1;
   const BUFFER_CHECK_INTERVAL_MS = 1000;
   const MIN_START_BUFFER_SECONDS = 12;
   const MIN_START_BUFFER_CLIPS = 1;
@@ -1079,7 +1080,7 @@
 
     const bufferInfo = getBufferInfo(videoTime);
 
-    if (bufferInfo.readyAhead > NEXT_BUFFER_THRESHOLD_SECONDS && bufferInfo.readyClipsAhead >= 4) {
+    if (bufferInfo.readyAhead > NEXT_BUFFER_THRESHOLD_SECONDS && bufferInfo.readyClipsAhead >= 6) {
       return;
     }
 
@@ -1090,7 +1091,8 @@
 
     const currentChunk = state.chunks.find((chunk) => chunk.end > videoTime);
     const needsCurrentAudio = currentChunk && !isChunkCovered(currentChunk.index);
-    const requestedChunks = needsCurrentAudio ? nextChunks.slice(0, SEEK_BUFFER_CLIPS) : nextChunks;
+    const immediateLimit = state.bufferedAudioSource ? SEEK_BUFFER_CLIPS : IMMEDIATE_PREPARE_CHUNKS;
+    const requestedChunks = needsCurrentAudio ? nextChunks.slice(0, immediateLimit) : nextChunks;
     const sessionId = state.sessionId;
     prepareAndAppendChunks(requestedChunks).catch((error) => {
       if (!isActiveSession(sessionId)) return;
@@ -1162,7 +1164,7 @@
     const sessionId = state.sessionId;
     const pending = chunks
       .filter((chunk) => !isChunkCovered(chunk.index))
-      .slice(0, state.bufferedAudioSource ? (state.startupPreparing ? 3 : 2) : MAX_PREPARE_CHUNKS);
+      .slice(0, state.bufferedAudioSource && state.startupPreparing ? 3 : MAX_PREPARE_CHUNKS);
 
     if (!pending.length) {
       return 0;
@@ -1180,6 +1182,7 @@
 
     try {
       const prepareStarted = Date.now();
+      const useStreaming = state.bufferedAudioSource || pending.length > 1;
       const response = await requestDubPrepare({
         backendUrl: els.backend.value,
         videoId: state.videoId,
@@ -1187,7 +1190,7 @@
         source: state.bufferedAudioSource ? "youtube-buffered" : state.browserAudioSource ? "youtube-captured" : "youtube-timedtext",
         settings: dubbingSettingsFromControls(),
         segments: pending,
-      }, state.bufferedAudioSource ? async item => {
+      }, useStreaming ? async item => {
         if (!isActiveSession(sessionId) || !pending.some(chunk => chunk.index === item.index) || state.preparedChunkIndexes.has(item.index)) return;
         const partial = normalizePreparedAudio({segments:[item]},pending);
         await bufferPreparedAudio(partial);
@@ -1201,7 +1204,11 @@
           state.prepared.push(entry);
         }
         state.prepared.sort((a,b)=>a.start-b.start);
+        if (!state.playbackHold && hasStartBufferReady(getVideoTime())) {
+          resumeVideoIfNeeded();
+        }
         renderAlert();
+        renderPlaybackStateUi();
       } : undefined);
       if (!isActiveSession(sessionId)) return 0;
       if (state.metrics) state.metrics.lastPrepareMs = Date.now() - prepareStarted;
@@ -1529,30 +1536,17 @@
     return response.payload || {};
   }
 
-  async function collectCaptionSegments(videoId) {
-    const sessionId = state.sessionId;
-    // Automatic voices require actual source audio and word-aligned turns,
-    // even when a text-only caption cache exists.
-    if (els.voice?.value === "auto") {
-      try {
-        const buffered = await transcribeBufferedWindow(videoId, getVideoTime(), 12);
-        if (!isActiveSession(sessionId)) return [];
-        if (buffered !== null) { state.bufferedAudioSource = true; return buffered; }
-      } catch (error) {
-        if (!isActiveSession(sessionId)) return [];
-        state.bufferedSourceInfo = `원음 분석 재시도: ${error.message}`;
-      }
-      if (typeof state.video?.captureStream === "function") return captureCaptionWindow(videoId);
-    }
+  async function collectTimedCaptionTracks(videoId, sessionId) {
     const cached = await fetchBackendCaptionSegments(videoId, { cacheOnly: true });
-    if (!isActiveSession(sessionId)) return [];
-    if (segmentsCoverPlaybackStart(cached, getVideoTime())) return cached;
+    if (!isActiveSession(sessionId)) return { segments: [], cached: [], fallbackReason: "Session ended" };
+    if (segmentsCoverPlaybackStart(cached, getVideoTime())) return { segments: cached, cached, fallbackReason: "" };
+
     let playerResponse = findPlayerResponse(videoId) || null;
     let tracks = getPlayerCaptionTracks(playerResponse);
 
     if (!tracks.length) {
       const pagePlayerResponse = await requestPagePlayerResponse(videoId);
-      if (!isActiveSession(sessionId)) return [];
+      if (!isActiveSession(sessionId)) return { segments: [], cached, fallbackReason: "Session ended" };
       const pageTracks = getPlayerCaptionTracks(pagePlayerResponse);
       if (pageTracks.length || !playerResponse) {
         playerResponse = pagePlayerResponse;
@@ -1566,30 +1560,77 @@
 
     if (tracks.length) {
       const parsed = await collectCaptionTracksWithBudget(tracks, videoId, sessionId);
-      if (!isActiveSession(sessionId)) return [];
+      if (!isActiveSession(sessionId)) return { segments: [], cached, fallbackReason };
       if (parsed.length) {
         state.transcriptWindows = [{ start: 0, end: state.video?.duration || getLastSegmentEnd(parsed) }];
-        return parsed;
+        return { segments: parsed, cached, fallbackReason };
       }
     }
 
     const textTrackSegments = readVideoTextTrackSegments();
     if (textTrackSegments.length) {
-      return textTrackSegments;
+      return { segments: textTrackSegments, cached, fallbackReason };
     }
 
     const transcriptSegments = state.pageTranscriptVideoId === videoId ? state.pageTranscriptSegments : [];
     if (transcriptSegments.length) {
-      return transcriptSegments;
+      return { segments: transcriptSegments, cached, fallbackReason };
     }
 
     if (ENABLE_VISIBLE_CAPTION_FALLBACK) {
       const visibleCaptionSegments = await collectVisibleCaptionSegments();
-      if (!isActiveSession(sessionId)) return [];
+      if (!isActiveSession(sessionId)) return { segments: [], cached, fallbackReason };
       if (visibleCaptionSegments.length) {
-        return visibleCaptionSegments;
+        return { segments: visibleCaptionSegments, cached, fallbackReason };
       }
     }
+
+    return { segments: [], cached, fallbackReason };
+  }
+
+  async function recoverBufferedWithTimedCaptions(sessionId) {
+    try {
+      const timed = await collectTimedCaptionTracks(state.videoId, sessionId);
+      if (!isActiveSession(sessionId) || !timed.segments.length) return false;
+      state.bufferedAudioSource = false;
+      state.browserAudioSource = false;
+      state.bufferedFailures = 0;
+      state.bufferedSourceInfo = "유튜브 자막 트랙으로 끊김 없이 전환";
+      state.transcriptWindows = [{ start: 0, end: state.video?.duration || getLastSegmentEnd(timed.segments) }];
+      maybeInstallExpandedSegments(timed.segments);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function collectCaptionSegments(videoId) {
+    const sessionId = state.sessionId;
+    // Automatic voices prefer zero-delay MSE buffered audio for word-aligned speaker turns,
+    // then fall back to instant timed captions (with backend speaker classification) before
+    // ever resorting to 8-second muted live recording.
+    if (els.voice?.value === "auto") {
+      try {
+        const buffered = await transcribeBufferedWindow(videoId, getVideoTime(), 12);
+        if (!isActiveSession(sessionId)) return [];
+        if (buffered !== null) { state.bufferedAudioSource = true; return buffered; }
+      } catch (error) {
+        if (!isActiveSession(sessionId)) return [];
+        state.bufferedSourceInfo = `원음 분석 재시도: ${error.message}`;
+      }
+      const timed = await collectTimedCaptionTracks(videoId, sessionId);
+      if (!isActiveSession(sessionId)) return [];
+      if (timed.segments.length) return timed.segments;
+      if (typeof state.video?.captureStream === "function") return captureCaptionWindow(videoId);
+      const preprocessed = await preprocessCaptionSegments(videoId, timed.cached);
+      if (!isActiveSession(sessionId)) return [];
+      if (preprocessed.length) return preprocessed;
+      throw new Error(`${timed.fallbackReason}; local speech recognition did not return captions.`);
+    }
+
+    const timed = await collectTimedCaptionTracks(videoId, sessionId);
+    if (!isActiveSession(sessionId)) return [];
+    if (timed.segments.length) return timed.segments;
 
     // Decode audio already buffered by YouTube without playing/rewinding it.
     try {
@@ -1603,10 +1644,10 @@
     // Original-element fallback for unsupported players/codecs.
     const localSegments = typeof state.video?.captureStream === "function"
       ? await captureCaptionWindow(videoId)
-      : await preprocessCaptionSegments(videoId, cached);
+      : await preprocessCaptionSegments(videoId, timed.cached);
     if (!isActiveSession(sessionId)) return [];
     if (localSegments.length || state.browserAudioSource) return localSegments;
-    throw new Error(`${fallbackReason}; local speech recognition did not return captions.`);
+    throw new Error(`${timed.fallbackReason}; local speech recognition did not return captions.`);
   }
 
   function getPlayerCaptionTracks(playerResponse) {
@@ -2616,14 +2657,31 @@
       return;
     }
 
-    if (state.bufferedAudioSource && state.bufferedFailures >= 3 && remainingTranscript < 1) {
+    if (state.bufferedAudioSource && state.bufferedFailures >= 3 && remainingTranscript < 2) {
+      const sessionId = state.sessionId;
+      if (typeof recoverBufferedWithTimedCaptions === "function") {
+        state.transcriptExpanding = true;
+        recoverBufferedWithTimedCaptions(sessionId).then(recovered => {
+          if (!isActiveSession(sessionId)) return;
+          if (!recovered) {
+            state.bufferedAudioSource = false;
+            state.browserAudioSource = true;
+            state.bufferedSourceInfo = "재생 버퍼를 읽을 수 없어 8초 실시간 수집으로 전환";
+          }
+        }).finally(() => {
+          if (!isActiveSession(sessionId)) return;
+          state.transcriptExpanding = false;
+          maybePrepareMoreAudio(getVideoTime(), "caption-fallback-complete");
+        });
+        return;
+      }
       state.bufferedAudioSource = false;
       state.browserAudioSource = true;
       state.bufferedSourceInfo = "재생 버퍼를 읽을 수 없어 8초 실시간 수집으로 전환";
     }
     if (state.bufferedAudioSource) {
-      if (Date.now() < state.bufferedRetryAt || (!missingCurrentWindow && remainingTranscript > 24) ||
-          (state.preparingChunks && remainingTranscript > 12)) return;
+      if (Date.now() < state.bufferedRetryAt || (!missingCurrentWindow && remainingTranscript > 36) ||
+          (state.preparingChunks && remainingTranscript > 24)) return;
       const sessionId = state.sessionId;
       state.transcriptExpanding = true;
       state.bufferedRetryAt = Date.now() + 1500;
@@ -2789,11 +2847,32 @@
 
     const merged = mergeTimedSegments(state.sourceSegments, segments);
     if (merged.length === state.sourceSegments.length) return false;
+    // Keep already-buffered and currently-playing chunks immutable across window
+    // expansions so a cross-window sentence merge never cuts off live speech or
+    // discards a prepared WAV clip.
+    const frozenChunks = state.chunks.filter(chunk =>
+      chunk.index === state.currentChunkIndex || isChunkCovered(chunk.index)
+    );
+    const trimAgainstFrozen = segment => {
+      let { start, end } = segment;
+      for (const f of frozenChunks) {
+        if (end <= f.start + 0.02 || start >= f.end - 0.02) continue;
+        if (start >= f.start - 0.05 && end <= f.end + 0.05) return null;
+        if (start < f.start && end > f.start) end = roundTime(f.start);
+        else if (start < f.end && end > f.end) start = roundTime(f.end);
+      }
+      return end > start + 0.05 ? { ...segment, start, end } : null;
+    };
     const chunkKey = chunk => `${chunk.start}:${chunk.end}:${chunk.text}`;
     const previousIndexes = new Map(state.chunks.map(chunk => [chunkKey(chunk), chunk.index]));
     let nextIndex = Math.max(-1, ...state.chunks.map(chunk => chunk.index)) + 1;
     state.sourceSegments = merged;
-    state.chunks = chunkSegments(merged).map(chunk => ({ ...chunk, index: previousIndexes.get(chunkKey(chunk)) ?? nextIndex++ }));
+    const freeSegments = frozenChunks.length ? merged.map(trimAgainstFrozen).filter(Boolean) : merged;
+    const rebuilt = chunkSegments(freeSegments, frozenChunks).map(chunk => ({
+      ...chunk,
+      index: previousIndexes.get(chunkKey(chunk)) ?? nextIndex++,
+    }));
+    state.chunks = [...frozenChunks, ...rebuilt].sort((a, b) => a.start - b.start);
     const validIndexes = new Set(state.chunks.map(chunk => chunk.index));
     if (!validIndexes.has(state.currentChunkIndex)) stopCurrentAudio();
     state.prepared = state.prepared.filter(item => validIndexes.has(item.chunkIndex));
@@ -3162,7 +3241,7 @@
     return Number(value) || 0;
   }
 
-  function chunkSegments(segments) {
+  function chunkSegments(segments, barriers = []) {
     const chunks = [];
     let current = null;
 
@@ -3174,8 +3253,9 @@
 
       const candidateText = `${current.text} ${segment.text}`.trim();
       const candidateDuration = segment.end - current.start;
+      const crossesBarrier = barriers.some(b => b.start >= current.end - 0.02 && b.end <= segment.start + 0.02);
 
-      if (current.speakerKey || segment.speakerKey || candidateDuration > 3.8 || candidateText.length > 120) {
+      if (crossesBarrier || current.speakerKey || segment.speakerKey || candidateDuration > 3.8 || candidateText.length > 120) {
         chunks.push(current);
         current = newChunk(segment);
         return;
@@ -3234,7 +3314,7 @@
   function selectUnpreparedChunksForWindow(chunks, currentTime) {
     return selectChunksForWindow(chunks, currentTime)
       .filter((chunk) => !isChunkCovered(chunk.index))
-      .slice(0, state.bufferedAudioSource ? (state.startupPreparing ? 3 : 2) : MAX_PREPARE_CHUNKS);
+      .slice(0, state.bufferedAudioSource && state.startupPreparing ? 3 : MAX_PREPARE_CHUNKS);
   }
 
   function formatAudioState(label, videoTime) {

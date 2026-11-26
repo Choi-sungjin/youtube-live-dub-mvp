@@ -216,3 +216,36 @@ test('local fallback voice keeps the selected speaker gender and Supertonic spee
   assert.equal(male.voice,'M1'); assert.equal(male.ttsProvider,'supertonic3'); assert.equal(male.ttsModel,'supertonic-3'); assert.equal(male.speed,1.15); assert.equal(male.targetLang,'ko');
   assert.equal(localVoiceSettings({voice:'marin'}).voice,'F1');
 });
+
+test('GPT translation runs concurrently and emits completed segments before slower siblings finish', async () => {
+  const order = [];
+  let active = 0, peakActive = 0;
+  const gates = [null, null, null];
+  const waits = [0, 1, 2].map(i => new Promise(r => { gates[i] = r; }));
+  const fetchImpl = async (_url, init) => {
+    const idx = active++;
+    peakActive = Math.max(peakActive, active);
+    const parsed = JSON.parse(JSON.parse(init.body).input);
+    const segIdx = Number(parsed.caption.split('#')[1]);
+    await waits[segIdx];
+    active--;
+    return { ok: true, body: stream([{ type: 'response.output_text.delta', delta: `번역-${segIdx}` }, { type: 'response.completed' }]) };
+  };
+  const segments = [0, 1, 2].map(index => ({ index, start: index * 3, end: index * 3 + 3, text: `line#${index}` }));
+  const run = translateOpenAI(segments, { targetLang: 'ko' }, {}, {
+    fetchImpl, apiKey: 'test-only',
+    onSegmentTranslated: (segment, text) => { order.push(`${segment.index}:${text}`); },
+  });
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(peakActive, 3);
+  gates[1]();
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(order, ['1:번역-1']);
+  gates[2]();
+  gates[0]();
+  const map = await run;
+  assert.equal(map.get(0), '번역-0');
+  assert.equal(map.get(1), '번역-1');
+  assert.equal(map.get(2), '번역-2');
+  assert.equal(order.length, 3);
+});

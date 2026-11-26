@@ -20,6 +20,12 @@ export function speakerStatus() {
   return { installed: existsSync(model), ready: Boolean(runtime?.ready), engine: 'audeering-onnx-cpu', apiRequests: 0 };
 }
 
+export async function warmSpeaker() {
+  if (!existsSync(model)) return speakerStatus();
+  await startWorker();
+  return speakerStatus();
+}
+
 export function selectSpeakerVoice(settings, classification) {
   if (!settings.autoSpeaker) return settings.voice;
   const voices = settings.ttsProvider === 'openai-realtime' ? {male:'cedar',female:'marin'}

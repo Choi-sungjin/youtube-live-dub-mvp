@@ -108,18 +108,33 @@ export async function readResponseStream(body, onDelta = () => {}) {
   return text.trim();
 }
 
-export async function translateOpenAI(segments, settings, metrics = {}, { fetchImpl = fetch, apiKey = process.env.OPENAI_API_KEY, retryDelaysMs = OPENAI_RETRY_DELAYS_MS } = {}) {
+export const OPENAI_TRANSLATION_CONCURRENCY = 4;
+
+export async function translateOpenAI(segments, settings, metrics = {}, {
+  fetchImpl = fetch,
+  apiKey = process.env.OPENAI_API_KEY,
+  retryDelaysMs = OPENAI_RETRY_DELAYS_MS,
+  concurrency = Number(process.env.OPENAI_TRANSLATION_CONCURRENCY || OPENAI_TRANSLATION_CONCURRENCY),
+  onSegmentTranslated = null,
+} = {}) {
   requireKey(apiKey);
   const model = resolveOpenAiTextModel(settings);
   const serviceTier = resolveOpenAiServiceTier(settings);
   const translated = new Map();
-  for (const segment of segments) {
-    const started = performance.now();
-    const text = await withRetries(() => translateCaption({ segment, settings, metrics, model, serviceTier, fetchImpl, apiKey, started }), retryDelaysMs, started);
-    translated.set(segment.index, text);
-    metrics.openaiTextModel = model;
-    if (serviceTier) metrics.openaiServiceTier = serviceTier;
+  const limit = Math.max(1, Math.min(8, Number.isFinite(concurrency) ? Math.floor(concurrency) : OPENAI_TRANSLATION_CONCURRENCY));
+  let cursor = 0;
+  async function worker() {
+    while (cursor < segments.length) {
+      const segment = segments[cursor++];
+      const started = performance.now();
+      const text = await withRetries(() => translateCaption({ segment, settings, metrics, model, serviceTier, fetchImpl, apiKey, started }), retryDelaysMs, started);
+      translated.set(segment.index, text);
+      metrics.openaiTextModel = model;
+      if (serviceTier) metrics.openaiServiceTier = serviceTier;
+      await onSegmentTranslated?.(segment, text);
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(limit, segments.length) }, () => worker()));
   return translated;
 }
 

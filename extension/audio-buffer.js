@@ -69,9 +69,23 @@
     for (const part of parts) { result.set(part,offset); offset+=part.length; }
     return result;
   }
+  const MP4_SEGMENT_LEAD_BOXES = new Set(['sidx', 'styp', 'emsg', 'prft', 'free', 'skip']);
+  function readBoxType(bytes, offset) {
+    return offset + 8 <= bytes.length ? String.fromCharCode(...bytes.subarray(offset + 4, offset + 8)) : '';
+  }
   function isBoundary(bytes) {
-    return bytes.length >= 8 && ((bytes[0]===0x1f && bytes[1]===0x43 && bytes[2]===0xb6 && bytes[3]===0x75) ||
-      String.fromCharCode(...bytes.subarray(4,8))==='moof');
+    if (bytes.length < 8) return false;
+    if (bytes[0]===0x1f && bytes[1]===0x43 && bytes[2]===0xb6 && bytes[3]===0x75) return true;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let i = 0; i + 8 <= bytes.length;) {
+      const box = readBoxType(bytes, i);
+      if (box === 'moof') return true;
+      if (!MP4_SEGMENT_LEAD_BOXES.has(box)) return false;
+      const size = view.getUint32(i);
+      if (size < 8 || i + size > bytes.length) return false;
+      i += size;
+    }
+    return false;
   }
   function initializationLength(bytes) {
     if (bytes.length < 8) return 0;
@@ -79,10 +93,11 @@
       for(let i=4;i<Math.min(bytes.length-4,262144);i++) {
         if(bytes[i]===0x1f && bytes[i+1]===0x43 && bytes[i+2]===0xb6 && bytes[i+3]===0x75) return i;
       }
-    } else if (String.fromCharCode(...bytes.subarray(4,8))==='ftyp') {
+    } else if (readBoxType(bytes, 0)==='ftyp') {
       const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
       for(let i=0;i+8<=bytes.length;) {
-        if(String.fromCharCode(...bytes.subarray(i+4,i+8))==='moof') return i;
+        const box=readBoxType(bytes, i);
+        if(box==='moof' || MP4_SEGMENT_LEAD_BOXES.has(box)) return i;
         const size=view.getUint32(i); if(size<8 || i+size>bytes.length) break; i+=size;
       }
     }

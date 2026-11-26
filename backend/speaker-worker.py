@@ -1,5 +1,6 @@
 """CPU voice-presentation classifier. Private JSON lines; no identity or age output."""
 import json
+import os
 import sys
 import subprocess
 import time
@@ -47,18 +48,19 @@ def classify(session, signal):
 
 
 def classify_timeline(session, signal):
-    # 750 ms cells with surrounding context preserve changes without asking the
-    # model to classify isolated phonemes. Uncertainty stays explicit.
+    # 1.5 s cells with surrounding context preserve changes without running heavy
+    # wav2vec2 passes on overlapping sub-second frames. Uncertainty stays explicit.
     turns = []
     last_label, last_reliable = None, -10
-    for offset in range(0, len(signal), 12000):
-        window = signal[max(0, offset - 6000):min(len(signal), offset + 18000)]
+    step = 24000
+    for offset in range(0, len(signal), step):
+        window = signal[max(0, offset - 4000):min(len(signal), offset + step + 4000)]
         result = classify(session, window)
-        start, end = offset / 16000, min(len(signal), offset + 12000) / 16000
+        start, end = offset / 16000, min(len(signal), offset + step) / 16000
         if result['label'] in ('male', 'female'):
             last_label, last_reliable = result['label'], start
         elif (last_label and result.get('candidate') in ('male', 'female') and result.get('confidence', 0) >= 0.5
-              and start - last_reliable <= 1.5):
+              and start - last_reliable <= 2.0):
             # Hysteresis avoids a voice flip on an uncertain sentence tail.
             # Never bridge silence or override a confident opposing vote.
             result = {**result, 'label': last_label, 'reason': 'temporal-voice'}
@@ -73,7 +75,7 @@ def classify_timeline(session, signal):
 if __name__ == '__main__':
     try:
         options = ort.SessionOptions()
-        options.intra_op_num_threads = 2
+        options.intra_op_num_threads = min(4, os.cpu_count() or 2)
         options.inter_op_num_threads = 1
         session = ort.InferenceSession(str(Path(__file__).parent / '.cache/speaker-model/model.onnx'),
                                        sess_options=options, providers=['CPUExecutionProvider'])

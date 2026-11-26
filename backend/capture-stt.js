@@ -24,7 +24,7 @@ export function validateCapture(body) {
   return audio;
 }
 
-export function createCaptureHandler({ cacheDir, transcribe, analyzeSpeakers, executeImpl = execute }) {
+export function createCaptureHandler({ cacheDir, transcribe, analyzeSpeakers, executeImpl = execute, speakerGraceMs = 1800 }) {
   let active = 0;
   return async (req) => {
     // Only extension requests with a non-simple header. Ordinary web origins and
@@ -35,6 +35,7 @@ export function createCaptureHandler({ cacheDir, transcribe, analyzeSpeakers, ex
     if (active >= 2) throw error(429, 'Original audio transcription is busy.');
     active++;
     let directory;
+    let deferredCleanup = null;
     try {
       const chunks = []; let size = 0;
       for await (const chunk of req) {
@@ -61,13 +62,34 @@ export function createCaptureHandler({ cacheDir, transcribe, analyzeSpeakers, ex
         inputPath = output;
       }
       const duration = body.end - body.start;
-      const [sttResult, speakerResult] = await Promise.allSettled([
-        transcribe({ inputPath, model: process.env.YLD_STT_MODEL || 'small', language: 'auto', lowLatency: body.buffered === true }),
-        body.autoSpeaker === true && analyzeSpeakers ? analyzeSpeakers({inputPath, duration}).catch(() => ({turns:[]})) : null,
-      ]);
-      if (sttResult.status === 'rejected') throw sttResult.reason;
-      const result = sttResult.value;
-      const analysis = speakerResult.status === 'fulfilled' ? speakerResult.value : {turns:[]};
+      const sttPromise = transcribe({ inputPath, model: process.env.YLD_STT_MODEL || 'small', language: 'auto', lowLatency: body.buffered === true });
+      const speakerTask = body.autoSpeaker === true && analyzeSpeakers
+        ? analyzeSpeakers({ inputPath, duration }).catch(() => ({ turns: [] }))
+        : null;
+      let result;
+      try {
+        result = await sttPromise;
+      } catch (sttError) {
+        if (speakerTask) await speakerTask.catch(() => {});
+        throw sttError;
+      }
+      let analysis = null;
+      if (speakerTask) {
+        let timer;
+        const timedOut = Symbol('speaker-timeout');
+        const settled = await Promise.race([
+          speakerTask,
+          new Promise(resolve => { timer = setTimeout(() => resolve(timedOut), Math.max(50, speakerGraceMs)); }),
+        ]).finally(() => clearTimeout(timer));
+        if (settled === timedOut) {
+          const dirToClean = directory;
+          directory = null;
+          deferredCleanup = speakerTask.finally(() => rm(dirToClean, { recursive: true, force: true }).catch(() => {}));
+          analysis = { turns: [] };
+        } else {
+          analysis = settled || { turns: [] };
+        }
+      }
       const clauses = analysis ? splitSpeakerSegments(result.segments || [], analysis.turns) : timedClauses(result.segments || []);
       let segments = clauses.map(segment => ({
         start: body.start + Math.max(0, Math.min(duration, Number(segment.start))),
@@ -79,7 +101,7 @@ export function createCaptureHandler({ cacheDir, transcribe, analyzeSpeakers, ex
       return { ok: true, source: 'browser-original-audio', videoId: body.videoId, segments,
         windows: [{ start: body.start, end: body.end }], inferenceMs: result.inferenceMs, speakerInferenceMs: analysis?.inferenceMs || 0 };
     } finally {
-      if (directory) await rm(directory, { recursive: true, force: true });
+      if (directory && !deferredCleanup) await rm(directory, { recursive: true, force: true });
       active--;
     }
   };

@@ -189,7 +189,7 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
     return status();
   }
 
-  async function translate(segments, settings = {}, metrics = {}) {
+  async function translate(segments, settings = {}, metrics = {}, { onSegmentTranslated = null } = {}) {
     await warm();
     const target = settings.targetLang || 'ko';
     const isChoiceQuestion = segment => /\bor\b/i.test(segment.text) && /let me know.*(?:think|comments)/i.test(segment.contextBefore || '');
@@ -275,6 +275,7 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
         if (issues(segment, text).length) throw new Error(`Local translation validation failed in segment ${segment.index}: ${issues(segment, text).join(', ')}.`);
         // Keep a complete sentence when it cannot fit; the player preserves its tail.
         translated.set(segment.index, text);
+        await onSegmentTranslated?.(segment, text);
       }
     }
     metrics.overBudgetSegments = segments.filter(segment => translated.get(segment.index).length > localTextBudget(segment, target)).length;

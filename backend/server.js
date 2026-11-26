@@ -1,4 +1,4 @@
-import { classifySpeaker, selectSpeakerVoice, speakerStatus, closeSpeaker, analyzeCapturedSpeakers } from './speaker-voices.js';
+import { classifySpeaker, selectSpeakerVoice, speakerStatus, warmSpeaker, closeSpeaker, analyzeCapturedSpeakers } from './speaker-voices.js';
 import { resolveDubbingMode, DUBBING_MODES } from './dubbing-modes.js';
 import { translateOpenAI, synthesizeOpenAISpeech, OPENAI_TEXT_MODEL, OPENAI_TEXT_MODELS, OPENAI_SERVICE_TIERS, OPENAI_VOICE_MODEL, OPENAI_VOICES, resolveOpenAiTextModel, resolveOpenAiServiceTier } from './openai-audio.js';
 import { synthesizeWindowsSpeech, wavDuration } from './windows-speech.js';
@@ -228,6 +228,7 @@ server.listen(PORT, HOST, () => {
   console.log(`YouTube Live Dub backend listening at http://${HOST}:${PORT}`);
   if (activeTtsProvider() === 'supertonic3') warmSupertonic().catch(error => console.warn(error.message));
   if (process.env.YLD_FAST_STT !== '0') warmFastStt().catch(error => console.warn(`Fast STT: ${error.message}`));
+  if (speakerStatus().installed && process.env.YLD_SPEAKER_WARM !== '0') warmSpeaker().catch(error => console.warn(`Speaker: ${error.message}`));
   if (activeTranslationProvider() === 'ollama') {
     LOCAL_TRANSLATOR.warm().catch(error => console.warn(error.message));
     localTranslationWarmTimer = setInterval(() => LOCAL_TRANSLATOR.warm({ refresh: true }).catch(error => console.warn(error.message)), 10 * 60 * 1000);
@@ -304,23 +305,73 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
     contextAfter: transcript.segments.filter(s=>s.start>=segment.end).slice(0,2).map(s=>s.text).join(' ').slice(0,240),
     contextTopic: transcript.segments.filter(s=>s.end>=segment.start-45 && s.start<=segment.end+20).map(s=>s.text).join(' ').slice(-2200),
   }));
-  const speakerResults = settings.autoSpeaker && ['openai-realtime', 'supertonic3'].includes(settings.ttsProvider) && !mediaTranscript && body?.source !== 'self-test'
-    ? mapLimit(limitedSegments, 3, segment => classifySpeaker({videoId, start: segment.start, end: segment.end, speakerKey:segment.speakerKey,
-      allowDownload: !['youtube-buffered', 'youtube-captured'].includes(body?.source)}))
-    : Promise.resolve(limitedSegments.map(() => null));
+  const segmentTranslations = new Map();
+  for (const segment of limitedSegments) {
+    let resolve, reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    promise.catch(() => {});
+    segmentTranslations.set(segment.index, { promise, resolve, reject, settled: false });
+  }
+  const notifyTranslated = (segment, text) => {
+    const entry = segmentTranslations.get(segment.index);
+    if (entry && !entry.settled && text) {
+      entry.settled = true;
+      entry.resolve(text);
+    }
+  };
+  const speakerPromises = settings.autoSpeaker && ['openai-realtime', 'supertonic3'].includes(settings.ttsProvider) && !mediaTranscript && body?.source !== 'self-test'
+    ? (() => {
+      const resolvers = limitedSegments.map(() => {
+        let resolve;
+        const promise = new Promise(res => { resolve = res; });
+        return { promise, resolve };
+      });
+      mapLimit(limitedSegments, 3, async (segment) => {
+        const idx = limitedSegments.indexOf(segment);
+        const result = await classifySpeaker({
+          videoId, start: segment.start, end: segment.end, speakerKey: segment.speakerKey,
+          allowDownload: !['youtube-buffered', 'youtube-captured'].includes(body?.source)
+        }, { budgetMs: 400 }).catch(() => null);
+        resolvers[idx].resolve(result);
+        return result;
+      }).catch(() => resolvers.forEach(r => r.resolve(null)));
+      return resolvers.map(r => r.promise);
+    })()
+    : limitedSegments.map(() => Promise.resolve(null));
   const translationStarted = performance.now();
   const translationFallbacks = new Map();
-  const translated = await translateSegments(limitedSegments, settings, timings, translationFallbacks);
-  timings.translationMs = Math.round(performance.now() - translationStarted);
-  const speakers = await speakerResults;
+  const translationRun = translateSegments(limitedSegments, settings, timings, translationFallbacks, notifyTranslated)
+    .then(map => {
+      timings.translationMs = Math.round(performance.now() - translationStarted);
+      for (const segment of limitedSegments) {
+        const entry = segmentTranslations.get(segment.index);
+        if (entry && !entry.settled) {
+          const text = map.get(segment.index);
+          entry.settled = true;
+          if (text) entry.resolve(text);
+          else entry.reject(httpError(502, `Translation missing for segment ${segment.index}.`));
+        }
+      }
+      return map;
+    }, error => {
+      for (const entry of segmentTranslations.values()) {
+        if (!entry.settled) { entry.settled = true; entry.reject(error); }
+      }
+      throw error;
+    });
   const speechStarted = performance.now();
-  const ttsConcurrency = clamp(Number(process.env.LOCAL_TTS_CONCURRENCY || 3), 1, 6);
+  const defaultTtsConcurrency = settings.ttsProvider === 'openai-realtime' ? 4 : 3;
+  const ttsConcurrency = clamp(Number(process.env.LOCAL_TTS_CONCURRENCY || defaultTtsConcurrency), 1, 6);
 
-  const preparedItems = await mapLimit(limitedSegments, ttsConcurrency, async (segment) => {
-    const speaker = speakers[limitedSegments.indexOf(segment)];
-    const speechSettings = {...settings, voice: selectSpeakerVoice(settings, speaker)};
-    const translation = translated.get(segment.index);
-    if (!translation) throw httpError(502, `Translation missing for segment ${segment.index}.`);
+  const [preparedItems] = await Promise.all([
+    mapLimit(limitedSegments, ttsConcurrency, async (segment) => {
+      const segmentPos = limitedSegments.indexOf(segment);
+      const [translation, speaker] = await Promise.all([
+        segmentTranslations.get(segment.index).promise,
+        speakerPromises[segmentPos],
+      ]);
+      const speechSettings = {...settings, voice: selectSpeakerVoice(settings, speaker)};
+      if (!translation) throw httpError(502, `Translation missing for segment ${segment.index}.`);
     // Local translation has already shortened and checked required facts. Do not
     // silently remove the end of a complete sentence after that validation.
     const spokenText = normalizeDubbingTranslation(cleanText(translation), segment.text, settings.targetLang);
@@ -393,9 +444,11 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
           : null
       }
     };
-    onPrepared?.(completed.item);
-    return completed;
-  });
+      onPrepared?.(completed.item);
+      return completed;
+    }),
+    translationRun,
+  ]);
 
   const hits = preparedItems.filter((result) => result.hit).length;
   const prepared = preparedItems.map((result) => result.item);
@@ -816,7 +869,7 @@ async function preferOpenAI(useOpenAI, useLocal) {
   }
 }
 
-async function translateSegments(segments, settings, metrics = {}, fallbacks = new Map()) {
+async function translateSegments(segments, settings, metrics = {}, fallbacks = new Map(), onSegmentTranslated = null) {
   const provider = activeTranslationProvider(settings);
   const translated = new Map();
   const missing = [];
@@ -825,6 +878,7 @@ async function translateSegments(segments, settings, metrics = {}, fallbacks = n
     const cached = await getCachedTranslation(segment, settings, provider);
     if (cached) {
       translated.set(segment.index, cached);
+      onSegmentTranslated?.(segment, cached);
     } else {
       missing.push(segment);
     }
@@ -837,9 +891,19 @@ async function translateSegments(segments, settings, metrics = {}, fallbacks = n
 
   let providerTranslations = new Map();
   let usedProvider = provider;
+  const earlyCached = new Set();
+  const emitSegment = async (segProvider, segment, text) => {
+    if (!text) return;
+    translated.set(segment.index, text);
+    earlyCached.add(segment.index);
+    await setCachedTranslation(segment, settings, segProvider, text);
+    onSegmentTranslated?.(segment, text);
+  };
   try {
     if (provider === 'ollama') {
-      providerTranslations = await LOCAL_TRANSLATOR.translate(missing, settings, metrics);
+      providerTranslations = await LOCAL_TRANSLATOR.translate(missing, settings, metrics, {
+        onSegmentTranslated: (segment, text) => emitSegment('ollama', segment, text),
+      });
     } else if (provider === 'zai' && process.env.ZAI_API_KEY) {
       if (Date.now() < zaiRateLimitUntil) {
         throw httpError(429, 'Z.ai rate limit cooldown is active.');
@@ -847,14 +911,22 @@ async function translateSegments(segments, settings, metrics = {}, fallbacks = n
       providerTranslations = await translateSegmentsWithZai(missing, settings);
     } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
       const { value, fallback } = await preferOpenAI(
-        () => translateOpenAI(missing, settings, metrics),
-        () => LOCAL_TRANSLATOR.translate(missing, settings, metrics));
-      providerTranslations = value;
+        () => translateOpenAI(missing, settings, metrics, {
+          onSegmentTranslated: (segment, text) => emitSegment('openai', segment, text),
+        }),
+        async () => {
+          const remaining = missing.filter(segment => !earlyCached.has(segment.index));
+          if (!remaining.length) return new Map();
+          return LOCAL_TRANSLATOR.translate(remaining, settings, metrics);
+        });
+      for (const [idx, text] of value.entries()) providerTranslations.set(idx, text);
       if (fallback) {
         // Cache Gemma text under its own provider so it never replays as a GPT translation.
         usedProvider = 'ollama';
         metrics.translationFallback = fallback;
-        for (const segment of missing) fallbacks.set(segment.index, fallback);
+        for (const segment of missing) {
+          if (!earlyCached.has(segment.index)) fallbacks.set(segment.index, fallback);
+        }
       }
     } else if (provider === 'mock') {
       providerTranslations = new Map(missing.map(segment => [segment.index, translateMock(segment.text, settings)]));
@@ -869,10 +941,12 @@ async function translateSegments(segments, settings, metrics = {}, fallbacks = n
   }
 
   for (const segment of missing) {
+    if (earlyCached.has(segment.index)) continue;
     const providerText = providerTranslations.get(segment.index);
     if (providerText) {
       translated.set(segment.index, providerText);
       await setCachedTranslation(segment, settings, usedProvider, providerText);
+      onSegmentTranslated?.(segment, providerText);
     } else {
       throw httpError(502, `Translation provider omitted segment ${segment.index}; no substitute text was generated.`);
     }

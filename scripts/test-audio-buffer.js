@@ -66,3 +66,30 @@ test('buffer prefetch runs ahead without pausing video and ignores results after
   resolveCapture([{start:62,end:68,text:'late'}]);await new Promise(resolve=>setImmediate(resolve));
   assert.equal(installed,0);assert.equal(prepare,0);
 });
+
+function mp4Box(type, payloadSize = 8) {
+  const total = 8 + payloadSize;
+  const out = new Uint8Array(total);
+  new DataView(out.buffer).setUint32(0, total);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  return out;
+}
+function concatBytes(...arrays) {
+  const out = new Uint8Array(arrays.reduce((n, a) => n + a.length, 0));
+  let offset = 0;
+  for (const a of arrays) { out.set(a, offset); offset += a.length; }
+  return out;
+}
+test('DASH MP4 segments starting with sidx+moof+mdat roll cleanly past 8 MiB without overflowing', () => {
+  const f = fixture();
+  const mp4Init = concatBytes(mp4Box('ftyp', 16), mp4Box('moov', 32));
+  const sidxSegment = size => concatBytes(mp4Box('sidx', 24), mp4Box('moof', 24), mp4Box('mdat', size));
+  f.audio.appendBuffer(mp4Init);
+  for (let i = 0; i < 12; i++) f.audio.appendBuffer(sidxSegment(900 * 1024));
+  const result = f.request();
+  assert.equal(result.available, true);
+  assert.ok(result.audio.byteLength <= 8 * 1024 * 1024);
+  const bytes = new Uint8Array(result.audio);
+  assert.equal(String.fromCharCode(...bytes.subarray(4, 8)), 'ftyp');
+  assert.equal(String.fromCharCode(...bytes.subarray(mp4Init.length + 4, mp4Init.length + 8)), 'sidx');
+});
