@@ -6,7 +6,7 @@
 
   const PANEL_ID = "yld-panel";
   const VIDEO_HUD_ID = "yld-video-hud";
-  const BUILD_VERSION = "0.9.7";
+  const BUILD_VERSION = "0.9.8";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -75,9 +75,12 @@
     lastProgrammaticPlayAt: 0,
     lastUserSeekAt: 0,
     lastSeekTargetTime: null,
+    pausedSeekActive: false,
     userPlayConfirmedAt: 0,
     extraPlayClickAt: 0,
     lastResumedAt: 0,
+    lastRenderedUiKey: "",
+    lastMetaKey: "",
     uiTimer: null,
     autoContinue: false,
     lastKnownVideoId: "",
@@ -500,6 +503,9 @@
       els.volumeLabel.textContent = `${els.volume.value}%`;
       applyOriginalVolume();
     });
+    els.diagnostics?.closest?.("details")?.addEventListener("toggle", () => {
+      renderPlaybackDiagnostics({ force: true });
+    });
   }
 
   async function refreshShortcuts() {
@@ -627,6 +633,9 @@
     state.startupPreparing = true;
     state.startupStartedAt = Date.now();
     state.prepareBatchStartedAt = 0;
+    state.pausedSeekActive = false;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
     state.userPlayConfirmedAt = Date.now();
     if (state.uiTimer) clearInterval(state.uiTimer);
@@ -791,6 +800,9 @@
     state.startupPreparing = false;
     state.startupStartedAt = 0;
     state.prepareBatchStartedAt = 0;
+    state.pausedSeekActive = false;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
     els.start.disabled = false;
     els.stop.disabled = true;
@@ -1042,6 +1054,9 @@
     if (state.playbackHold || state.video.paused || state.video.ended) return;
     state.playbackHold = { reason, startedAt: Date.now() };
     state.resumeVideoAfterPrepare = true;
+    state.pausedSeekActive = false;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
     if (state.metrics) state.metrics[reason === 'tail' ? 'tailWaits' : 'bufferWaits']++;
     pauseVideoProgrammatically();
@@ -1054,6 +1069,9 @@
       state.metrics.bufferWaitMs += Date.now() - state.playbackHold.startedAt;
     }
     state.playbackHold = null;
+    state.pausedSeekActive = false;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
   }
 
@@ -1171,15 +1189,22 @@
       return 0;
     }
 
+    const isUserPausedIdle = () => Boolean(
+      state.video?.paused && !state.video.ended && !state.playbackHold && !state.startupPreparing && !state.resumeVideoAfterPrepare
+    );
     state.preparingChunks = true;
     state.prepareBatchStartedAt = Date.now();
-    setStatus(state.prepared.length ? "buffering" : "backend");
+    if (!isUserPausedIdle()) {
+      setStatus(state.prepared.length ? "buffering" : "backend");
+    }
     renderPlaybackStateUi();
-    updateMeta(
-      state.videoId,
-      `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
-      formatAudioState(`preparing ${pending.length} clips`, getVideoTime())
-    );
+    if (!isUserPausedIdle()) {
+      updateMeta(
+        state.videoId,
+        `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
+        formatAudioState(`preparing ${pending.length} clips`, getVideoTime())
+      );
+    }
 
     try {
       const prepareStarted = Date.now();
@@ -1222,7 +1247,7 @@
 
       if (!prepared.length) {
         const installed = pending.filter(chunk => state.preparedChunkIndexes.has(chunk.index)).length;
-        if (installed) setStatus("ready");
+        if (installed && !isUserPausedIdle()) setStatus("ready");
         return installed;
       }
 
@@ -1248,12 +1273,14 @@
         resumeVideoIfNeeded();
       }
 
-      setStatus("ready");
-      updateMeta(
-        state.videoId,
-        `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
-        formatAudioState(`${state.prepared.length}/${state.chunks.length} clips buffered`, getVideoTime())
-      );
+      if (!isUserPausedIdle()) {
+        setStatus("ready");
+        updateMeta(
+          state.videoId,
+          `${state.sourceSegments.length} segments, ${state.chunks.length} chunks`,
+          formatAudioState(`${state.prepared.length}/${state.chunks.length} clips buffered`, getVideoTime())
+        );
+      }
       return validPrepared.length;
     } finally {
       if (state.sessionId === sessionId) {
@@ -3886,11 +3913,18 @@
   }
 
   function updateMeta(video, captions, audio) {
-    els.meta.innerHTML = `
-      <div><strong>Video:</strong> ${escapeHtml(video || "unknown")}</div>
-      <div><strong>Captions:</strong> ${escapeHtml(captions || "not loaded")}</div>
-      <div><strong>Audio:</strong> ${escapeHtml(audio || "none")}</div>
-    `;
+    const v = video || "unknown";
+    const c = captions || "not loaded";
+    const a = audio || "none";
+    const nextMetaKey = `${v}\n${c}\n${a}`;
+    if (els.meta && nextMetaKey !== state.lastMetaKey) {
+      state.lastMetaKey = nextMetaKey;
+      els.meta.innerHTML = `
+        <div><strong>Video:</strong> ${escapeHtml(v)}</div>
+        <div><strong>Captions:</strong> ${escapeHtml(c)}</div>
+        <div><strong>Audio:</strong> ${escapeHtml(a)}</div>
+      `;
+    }
     renderAlert();
   }
 
@@ -3926,6 +3960,7 @@
     if (type === "seeking" || type === "seeked") {
       state.lastUserSeekAt = now;
       state.lastSeekTargetTime = getVideoTime();
+      if (state.video.paused) state.pausedSeekActive = true;
       syncAudioToVideo();
       renderPlaybackStateUi();
       return;
@@ -3941,6 +3976,7 @@
         renderPlaybackStateUi();
         return;
       }
+      state.pausedSeekActive = false;
       state.userPlayConfirmedAt = now;
       state.lastResumedAt = now;
       if (state.status === "paused") setStatus("ready");
@@ -3955,6 +3991,7 @@
       }
       if (!state.playbackHold && !state.startupPreparing) {
         state.resumeVideoAfterPrepare = false;
+        if (now - state.lastUserSeekAt < 1500) state.pausedSeekActive = true;
         if (state.currentAudio && !state.currentAudio.paused) pauseDubAudio(state.currentAudio);
         setStatus("paused");
       }
@@ -3966,6 +4003,9 @@
     if (!state.running || !state.video) return;
     finishPlaybackHold();
     state.resumeVideoAfterPrepare = false;
+    state.pausedSeekActive = state.lastUserSeekAt > 0 && Date.now() - state.lastUserSeekAt < 10000;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
     stopCurrentAudio();
     pauseVideoProgrammatically();
@@ -3977,6 +4017,9 @@
     if (!state.running || !state.video) return;
     state.userPlayConfirmedAt = Date.now();
     state.lastResumedAt = Date.now();
+    state.pausedSeekActive = false;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
     if (state.status === "paused") setStatus("ready");
     playVideoProgrammatically();
@@ -3988,6 +4031,9 @@
     if (!state.running || !state.video) return;
     finishPlaybackHold();
     state.resumeVideoAfterPrepare = false;
+    state.pausedSeekActive = false;
+    state.lastRenderedUiKey = "";
+    state.lastMetaKey = "";
     state.extraPlayClickAt = 0;
     if (state.currentAudio && !state.currentAudio.paused) pauseDubAudio(state.currentAudio);
     pauseVideoProgrammatically();
@@ -4282,11 +4328,12 @@
       const currentReady = state.prepared.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
       const noCaptionNow = !hasDubbedCaptionAt(videoTime);
       const readyHere = currentReady || (noCaptionNow && (!state.chunks.length || isTranscriptKnownAt(videoTime) || !state.transcriptWindows.length));
-      const detail = (state.preparingChunks || state.transcriptExpanding) && !currentReady
-        ? `이동 위치(${posLabel}) 더빙 미리 준비 중… · 재생(▶) 1회 클릭 시 준비 후 시작`
-        : recentSeek && readyHere
-          ? `이동 위치(${posLabel}) 더빙 준비 완료 ✓ · 재생(▶) 1회 클릭 시 즉시 시작`
-          : `정지 상태 (${posLabel}) · 재생(▶)을 한 번만 누르면 이어집니다`;
+      const seekWhilePaused = state.pausedSeekActive || recentSeek;
+      const detail = (state.preparingChunks || state.transcriptExpanding) && !readyHere
+        ? `위치 ${posLabel} 미리 준비 중… · 재생(▶) 시 자동 시작`
+        : seekWhilePaused && readyHere
+          ? `위치 ${posLabel} 준비 완료 ✓ · 재생(▶) 시 즉시 시작`
+          : `정지 상태 (${posLabel}) · 재생(▶)을 누르면 이어집니다`;
       return {
         visible: true,
         tone: "paused",
@@ -4357,48 +4404,64 @@
 
   function renderPlaybackStateUi() {
     const ui = computePlaybackUiState();
+    const uiKey = JSON.stringify(ui);
+    if (uiKey === state.lastRenderedUiKey && (!ui.visible || els.videoHud?.isConnected)) {
+      return;
+    }
+    state.lastRenderedUiKey = uiKey;
     if (els.stateBanner) {
-      els.stateBanner.hidden = !ui.visible;
+      if (els.stateBanner.hidden !== !ui.visible) els.stateBanner.hidden = !ui.visible;
       if (ui.visible) {
-        els.stateBanner.dataset.tone = ui.tone;
-        if (els.stateTitle) els.stateTitle.textContent = ui.title;
-        if (els.stateDetail) els.stateDetail.textContent = ui.detail;
+        if (els.stateBanner.dataset.tone !== ui.tone) els.stateBanner.dataset.tone = ui.tone;
+        if (els.stateTitle && els.stateTitle.textContent !== ui.title) els.stateTitle.textContent = ui.title;
+        if (els.stateDetail && els.stateDetail.textContent !== ui.detail) els.stateDetail.textContent = ui.detail;
         if (els.stateAction) {
-          els.stateAction.hidden = !ui.actionLabel;
-          els.stateAction.textContent = ui.actionLabel;
+          const hideAction = !ui.actionLabel;
+          if (els.stateAction.hidden !== hideAction) els.stateAction.hidden = hideAction;
+          if (!hideAction && els.stateAction.textContent !== ui.actionLabel) els.stateAction.textContent = ui.actionLabel;
         }
         if (els.stateProgress && els.stateProgressFill) {
-          els.stateProgress.hidden = ui.progress === null;
-          if (ui.progress !== null) els.stateProgressFill.style.width = `${ui.progress}%`;
+          const hideBar = ui.progress === null;
+          if (els.stateProgress.hidden !== hideBar) els.stateProgress.hidden = hideBar;
+          if (!hideBar) {
+            const w = `${ui.progress}%`;
+            if (els.stateProgressFill.style.width !== w) els.stateProgressFill.style.width = w;
+          }
         }
       }
     }
     const hud = ui.visible ? ensureVideoHud() : els.videoHud;
     if (!hud) return;
-    hud.hidden = !ui.visible;
+    if (hud.hidden !== !ui.visible) hud.hidden = !ui.visible;
     if (!ui.visible) return;
-    hud.dataset.tone = ui.tone;
+    if (hud.dataset.tone !== ui.tone) hud.dataset.tone = ui.tone;
     hud.classList.toggle("yld-hud-compact", Boolean(ui.compact));
-    if (els.hudTitle) els.hudTitle.textContent = ui.title;
+    if (els.hudTitle && els.hudTitle.textContent !== ui.title) els.hudTitle.textContent = ui.title;
     if (els.hudDetail) {
-      els.hudDetail.hidden = Boolean(ui.compact);
-      els.hudDetail.textContent = ui.detail;
+      const hideDetail = Boolean(ui.compact);
+      if (els.hudDetail.hidden !== hideDetail) els.hudDetail.hidden = hideDetail;
+      if (els.hudDetail.textContent !== ui.detail) els.hudDetail.textContent = ui.detail;
     }
     if (els.hudAction) {
       const showHudAction = Boolean(ui.actionLabel) && !ui.compact;
-      els.hudAction.hidden = !showHudAction;
-      if (showHudAction) els.hudAction.textContent = ui.actionLabel;
+      if (els.hudAction.hidden !== !showHudAction) els.hudAction.hidden = !showHudAction;
+      if (showHudAction && els.hudAction.textContent !== ui.actionLabel) els.hudAction.textContent = ui.actionLabel;
     }
     if (els.hudProgress && els.hudProgressFill) {
       const showBar = ui.progress !== null && !ui.compact;
-      els.hudProgress.hidden = !showBar;
-      if (showBar) els.hudProgressFill.style.width = `${ui.progress}%`;
+      if (els.hudProgress.hidden !== !showBar) els.hudProgress.hidden = !showBar;
+      if (showBar) {
+        const w = `${ui.progress}%`;
+        if (els.hudProgressFill.style.width !== w) els.hudProgressFill.style.width = w;
+      }
     }
   }
 
-  function renderPlaybackDiagnostics() {
+  function renderPlaybackDiagnostics(options = {}) {
     renderPlaybackStateUi();
     if (!els.diagnostics) return;
+    const detailsBox = els.diagnostics.closest?.("details");
+    if (detailsBox && !detailsBox.open && !options.force) return;
     const video = state.video;
     const audio = state.currentAudio || state.testAudio;
     const item = state.prepared.find(entry => entry.audio === audio);

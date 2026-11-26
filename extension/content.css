@@ -28,6 +28,9 @@
   border-radius: 12px;
   background: var(--yld-bg);
   backdrop-filter: blur(10px);
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  font-variant-numeric: tabular-nums;
   color: var(--yld-fg);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
   font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -134,6 +137,7 @@
   display: grid;
   gap: 10px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   padding: 12px;
 }
@@ -374,6 +378,13 @@
   overflow-wrap: anywhere;
 }
 
+.yld-meta > div:not(.yld-error) {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .yld-meta strong {
   color: var(--yld-fg);
   font-weight: 700;
@@ -459,11 +470,14 @@
 
 .yld-state-banner {
   display: grid;
-  gap: 6px;
+  gap: 5px;
+  min-height: 56px;
+  align-content: center;
   padding: 9px 11px;
   border-radius: 9px;
   border: 1px solid var(--yld-border);
   background: rgba(47, 140, 255, 0.14);
+  font-variant-numeric: tabular-nums;
 }
 
 .yld-state-banner[data-tone="preparing"] {
@@ -491,9 +505,14 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .yld-state-badge {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 12.5px;
   font-weight: 800;
   color: var(--yld-fg);
@@ -501,6 +520,10 @@
 }
 
 .yld-state-detail {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 11px;
   line-height: 1.45;
   color: var(--yld-muted);
@@ -549,14 +572,20 @@
   top: 14px;
   left: 14px;
   z-index: 65;
-  max-width: min(440px, calc(100% - 28px));
+  width: min(364px, calc(100% - 28px));
+  max-width: calc(100% - 28px);
+  min-height: 58px;
+  align-content: center;
   display: grid;
-  gap: 6px;
+  gap: 5px;
   padding: 10px 14px;
   border-radius: 11px;
   border: 1.5px solid rgba(255, 255, 255, 0.25);
   background: rgba(12, 16, 24, 0.9);
   backdrop-filter: blur(10px);
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  font-variant-numeric: tabular-nums;
   color: #f8fafc;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
   font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -585,6 +614,8 @@
 }
 
 #yld-video-hud.yld-hud-compact {
+  width: auto;
+  min-height: 0;
   padding: 5px 11px;
   gap: 0;
   border-radius: 999px;
@@ -598,9 +629,14 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
 }
 
 #yld-video-hud .yld-hud-title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 13.5px;
   font-weight: 800;
   letter-spacing: -0.01em;
@@ -614,6 +650,10 @@
 }
 
 #yld-video-hud .yld-hud-detail {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 12px;
   font-weight: 500;
   color: #e2e8f0;

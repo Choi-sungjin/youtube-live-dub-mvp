@@ -992,3 +992,41 @@ test('prepare requests report live bufferAhead queue depth and HUD marks HQ 2.1 
   assert.match(ui.detail, /HQ 2\.1/);
   f.stopDub();
 });
+
+test('paused state stays completely stable without status/detail oscillation when background rolling prefetch runs or seek timer ages', async () => {
+  const f = await contentFixture({
+    prepare: async payload => ({ segments: payload.segments.map(c => ({ ...c, audioUrl: 'future.wav' })) }),
+  });
+  f.state.running = true;
+  f.state.chunks = [
+    { index: 0, start: 0, end: 4, text: 'intro' },
+    { index: 1, start: 10, end: 14, text: 'later' },
+  ];
+  f.state.sourceSegments = f.state.chunks;
+  const a0 = { paused: false, currentTime: 4, duration: 4, pause() { this.paused = true; } };
+  f.state.prepared = [{ chunkIndex: 0, start: 0, end: 4, ttsModel: 'supertonic-3', audio: a0 }];
+  f.state.preparedChunkIndexes = new Set([0]);
+
+  // User pauses on a silent gap (t = 6s, between chunk 0 [0..4] and chunk 1 [10..14])
+  f.video.currentTime = 6;
+  f.video.paused = true;
+  f.handleVideoInteractionEvents('pause');
+  assert.equal(f.state.status, 'paused');
+  const baselineDetail = f.computePlaybackUiState().detail;
+  assert.match(baselineDetail, /정지 상태/);
+
+  // Background rolling lookahead starts and finishes for future chunk 1: paused status & banner detail must NOT flicker!
+  f.state.preparingChunks = true;
+  assert.equal(f.computePlaybackUiState().detail, baselineDetail);
+  await f.prepareAndAppendChunks([f.state.chunks[1]]);
+  assert.equal(f.state.status, 'paused');
+  assert.equal(f.computePlaybackUiState().detail, baselineDetail);
+
+  // Seek while paused: ready message stays latched even after >10s (no 6-second box resize jump)
+  f.video.currentTime = 11;
+  f.handleVideoInteractionEvents('seeked');
+  const seekReadyDetail = f.computePlaybackUiState(Date.now()).detail;
+  assert.match(seekReadyDetail, /준비 완료 ✓/);
+  assert.equal(f.computePlaybackUiState(Date.now() + 20000).detail, seekReadyDetail);
+  f.stopDub();
+});

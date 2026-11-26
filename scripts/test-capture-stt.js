@@ -234,7 +234,10 @@ test('slow speaker timeline exceeding grace budget does not stall STT response a
     assert.equal(result.segments[0].text, 'Fast.');
     assert.equal(result.segments[0].speaker.label, 'unknown');
     finishSpeaker({ turns: [] });
-    await new Promise(r => setTimeout(r, 20));
+    const waitStart = Date.now();
+    while ((await readdir(cacheDir)).length && Date.now() - waitStart < 1000) {
+      await new Promise(r => setTimeout(r, 15));
+    }
     assert.deepEqual(await readdir(cacheDir), []);
   } finally { await rm(cacheDir, { recursive: true, force: true }); }
 });
