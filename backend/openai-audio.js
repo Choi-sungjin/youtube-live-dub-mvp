@@ -71,6 +71,14 @@ function openaiFailure(message, retryable) {
   return error;
 }
 
+function requestAbortedError() {
+  const error = new Error('OpenAI request cancelled after dubbing stopped.');
+  error.aborted = true;
+  error.retryable = false;
+  error.statusCode = 499;
+  return error;
+}
+
 const safeCode = value => String(value || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
 
 // Realtime reports most failures as an error event after the upgrade, and some as a non-101 reply.
@@ -144,8 +152,10 @@ export async function translateOpenAI(segments, settings, metrics = {}, {
   retryDelaysMs = OPENAI_RETRY_DELAYS_MS,
   concurrency = Number(process.env.OPENAI_TRANSLATION_CONCURRENCY || OPENAI_TRANSLATION_CONCURRENCY),
   onSegmentTranslated = null,
+  signal = null,
 } = {}) {
   requireKey(apiKey);
+  if (signal?.aborted) throw requestAbortedError();
   const model = resolveOpenAiTextModel(settings);
   const serviceTier = resolveOpenAiServiceTier(settings);
   const translated = new Map();
@@ -153,9 +163,10 @@ export async function translateOpenAI(segments, settings, metrics = {}, {
   let cursor = 0;
   async function worker() {
     while (cursor < segments.length) {
+      if (signal?.aborted) throw requestAbortedError();
       const segment = segments[cursor++];
       const started = performance.now();
-      const text = await withRetries(() => translateCaption({ segment, settings, metrics, model, serviceTier, fetchImpl, apiKey, started }), retryDelaysMs, started);
+      const text = await withRetries(() => translateCaption({ segment, settings, metrics, model, serviceTier, fetchImpl, apiKey, started, signal }), retryDelaysMs, started);
       translated.set(segment.index, text);
       metrics.openaiTextModel = model;
       if (serviceTier) metrics.openaiServiceTier = serviceTier;
@@ -166,11 +177,13 @@ export async function translateOpenAI(segments, settings, metrics = {}, {
   return translated;
 }
 
-async function translateCaption({ segment, settings, metrics, model, serviceTier, fetchImpl, apiKey, started }) {
+async function translateCaption({ segment, settings, metrics, model, serviceTier, fetchImpl, apiKey, started, signal }) {
+  if (signal?.aborted) throw requestAbortedError();
   let response;
+  const fetchSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000);
   try {
     response = await fetchImpl('https://api.openai.com/v1/responses', {
-      method: 'POST', signal: AbortSignal.timeout(60000),
+      method: 'POST', signal: fetchSignal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model, stream: true, store: false,
@@ -189,6 +202,7 @@ async function translateCaption({ segment, settings, metrics, model, serviceTier
       }),
     });
   } catch (error) {
+    if (signal?.aborted) throw requestAbortedError();
     throw networkFailure('translation', error);
   }
   if (!response.ok) {
@@ -201,6 +215,7 @@ async function translateCaption({ segment, settings, metrics, model, serviceTier
   try {
     return await readResponseStream(response.body, () => { if (first) { metrics.firstTextDeltaMs = Math.round(performance.now() - started); first = false; } });
   } catch (error) {
+    if (signal?.aborted) throw requestAbortedError();
     if (error instanceof TypeError || error?.name === 'TimeoutError' || error?.name === 'AbortError') throw networkFailure('translation', error);
     throw error;
   }
@@ -233,14 +248,15 @@ export function pcmWave(pcm) {
   return Buffer.concat([header, smoothed]);
 }
 
-export async function synthesizeOpenAISpeech({ text, settings = {}, outputPath }, { apiKey = process.env.OPENAI_API_KEY, Socket = null, retryDelaysMs = OPENAI_RETRY_DELAYS_MS } = {}) {
+export async function synthesizeOpenAISpeech({ text, settings = {}, outputPath, signal = null }, { apiKey = process.env.OPENAI_API_KEY, Socket = null, retryDelaysMs = OPENAI_RETRY_DELAYS_MS } = {}) {
   requireKey(apiKey);
+  if (signal?.aborted) throw requestAbortedError();
   if (!text?.trim() || text.length > 5000) throw new Error('Speech text must contain 1–5000 characters.');
   const SocketClass = Socket || (await import('ws')).default;
   const model = resolveOpenAiVoiceModel(settings);
   const voice = OPENAI_VOICES.includes(settings.voice) ? settings.voice : 'marin';
   const started = performance.now();
-  const result = await withRetries(() => realtimeSpeech(SocketClass, { apiKey, model, voice, text, started }), retryDelaysMs, started);
+  const result = await withRetries(() => realtimeSpeech(SocketClass, { apiKey, model, voice, text, started, signal }), retryDelaysMs, started);
   const temporary = `${outputPath}.${randomUUID()}.tmp`;
   try { await writeFile(temporary, pcmWave(result.pcm)); await rename(temporary, outputPath); }
   finally { await rm(temporary, { force: true }); }
@@ -248,18 +264,22 @@ export async function synthesizeOpenAISpeech({ text, settings = {}, outputPath }
     synthesisMs: Math.round(performance.now() - started), firstAudioMs: result.firstAudioMs, transcript: result.transcript };
 }
 
-function realtimeSpeech(SocketClass, { apiKey, model, voice, text, started }) {
+function realtimeSpeech(SocketClass, { apiKey, model, voice, text, started, signal }) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(requestAbortedError());
     const ws = new SocketClass(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
       headers: { Authorization: `Bearer ${apiKey}` }, handshakeTimeout: 15000, maxPayload: 16 * 1024 * 1024,
     });
     let settled = false, sent = false, bytes = 0, firstAudioMs = null, transcript = '';
     const chunks = [];
+    const onAbort = () => finish(requestAbortedError());
     const finish = (error, value) => {
       if (settled) return; settled = true; clearTimeout(timer);
-      if (ws.readyState === 1) ws.close(); else ws.terminate();
+      signal?.removeEventListener('abort', onAbort);
+      if (ws.readyState === 1 && !error?.aborted) ws.close(); else ws.terminate();
       if (error) reject(error); else resolve(value);
     };
+    signal?.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => finish(openaiFailure('OpenAI voice timed out.', false)), 60000);
     const send = value => ws.send(JSON.stringify(value));
     // A non-101 reply carries the real reason (bad key, model access, quota); read only its error code.

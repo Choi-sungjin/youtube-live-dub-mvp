@@ -6,7 +6,7 @@
 
   const PANEL_ID = "yld-panel";
   const VIDEO_HUD_ID = "yld-video-hud";
-  const BUILD_VERSION = "0.9.8";
+  const BUILD_VERSION = "0.9.9";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -80,7 +80,9 @@
     extraPlayClickAt: 0,
     lastResumedAt: 0,
     lastRenderedUiKey: "",
+    lastActionStateKey: "",
     lastMetaKey: "",
+    activePrepareIds: new Set(),
     uiTimer: null,
     autoContinue: false,
     lastKnownVideoId: "",
@@ -137,7 +139,10 @@
     window.addEventListener("message", handlePageMessage);
     installPageProbe();
     document.addEventListener("yt-navigate-start", () => {
-      if (state.running) stopDub({ resumeVideo: false, preserveAutoContinue: true });
+      if (state.running || state.activePrepareIds.size) stopDub({ resumeVideo: false, preserveAutoContinue: true });
+    });
+    window.addEventListener?.("pagehide", () => {
+      if (state.running || state.activePrepareIds.size) stopDub({ resumeVideo: false, preserveAutoContinue: true });
     });
     document.addEventListener("yt-navigate-finish", handleNavigation);
     window.addEventListener("popstate", handleNavigation);
@@ -590,6 +595,7 @@
       status: state.status,
       videoId: state.videoId || getVideoId() || "",
       backendUrl: els.backend?.value || DEFAULT_BACKEND_URL,
+      actionState: computeActionIconState(),
     };
   }
 
@@ -736,7 +742,7 @@
 
       const prepare = await requestDubPrepare({
         backendUrl,
-        videoId: getVideoId() || "self-test",
+        videoId: "self-test",
         currentTime: getVideoTime(),
         source: "self-test",
         settings: {
@@ -794,6 +800,7 @@
     state.sourceCapture?.cancel();
     state.captureProcessing = false;
     state.sessionId += 1;
+    abortActivePrepares();
     state.captionAbortController?.abort();
     state.captionAbortController = null;
     state.running = false;
@@ -1087,9 +1094,14 @@
     state.currentChunkIndex = -1;
   }
 
+  function isUserPausedIdle() {
+    return Boolean(
+      state.video?.paused && !state.video.ended && !state.playbackHold && !state.startupPreparing && !state.resumeVideoAfterPrepare
+    );
+  }
+
   function maybePrepareMoreAudio(videoTime, reason = "auto") {
-    if (state.captureProcessing) return;
-    if (!state.running) return;
+    if (state.captureProcessing || !state.running || state.video?.ended) return;
     maybeExpandTranscriptCoverage(videoTime);
     if (state.captureProcessing || !state.chunks.length) return;
 
@@ -1110,8 +1122,17 @@
 
     const currentChunk = state.chunks.find((chunk) => chunk.end > videoTime);
     const needsCurrentAudio = currentChunk && !isChunkCovered(currentChunk.index);
-    const immediateLimit = state.bufferedAudioSource ? SEEK_BUFFER_CLIPS : IMMEDIATE_PREPARE_CHUNKS;
-    const requestedChunks = needsCurrentAudio ? nextChunks.slice(0, immediateLimit) : nextChunks;
+    const pausedIdle = isUserPausedIdle();
+    if (pausedIdle) {
+      const currentWindowChunk = state.chunks.find(
+        (chunk) => videoTime >= chunk.start - PREPARE_LEAD_SECONDS && videoTime < chunk.end
+      );
+      if (!currentWindowChunk || isChunkCovered(currentWindowChunk.index)) {
+        return;
+      }
+    }
+    const immediateLimit = pausedIdle ? 1 : (state.bufferedAudioSource ? SEEK_BUFFER_CLIPS : IMMEDIATE_PREPARE_CHUNKS);
+    const requestedChunks = (needsCurrentAudio || pausedIdle) ? nextChunks.slice(0, immediateLimit) : nextChunks;
     const sessionId = state.sessionId;
     prepareAndAppendChunks(requestedChunks).catch((error) => {
       if (!isActiveSession(sessionId)) return;
@@ -1189,9 +1210,6 @@
       return 0;
     }
 
-    const isUserPausedIdle = () => Boolean(
-      state.video?.paused && !state.video.ended && !state.playbackHold && !state.startupPreparing && !state.resumeVideoAfterPrepare
-    );
     state.preparingChunks = true;
     state.prepareBatchStartedAt = Date.now();
     if (!isUserPausedIdle()) {
@@ -1209,15 +1227,18 @@
     try {
       const prepareStarted = Date.now();
       const useStreaming = state.bufferedAudioSource || pending.length > 1;
+      const pausedIdle = isUserPausedIdle();
       const currentBuffer = getBufferInfo(getVideoTime());
       const response = await requestDubPrepare({
         backendUrl: els.backend.value,
         videoId: state.videoId,
         currentTime: getVideoTime(),
-        bufferAhead: {
-          seconds: roundTime(currentBuffer.readyAhead),
-          clips: currentBuffer.readyClipsAhead,
-        },
+        bufferAhead: pausedIdle
+          ? { seconds: 0, clips: 0 }
+          : {
+            seconds: roundTime(currentBuffer.readyAhead),
+            clips: currentBuffer.readyClipsAhead,
+          },
         source: state.bufferedAudioSource ? "youtube-buffered" : state.browserAudioSource ? "youtube-captured" : "youtube-timedtext",
         settings: dubbingSettingsFromControls(),
         segments: pending,
@@ -1532,8 +1553,18 @@
     state.objectUrls = [];
   }
 
+  function abortActivePrepares() {
+    if (!state.activePrepareIds.size) return;
+    const requestIds = [...state.activePrepareIds];
+    state.activePrepareIds.clear();
+    if (!state.connectionLost && typeof chrome?.runtime?.sendMessage === "function" && hasRuntimeConnection()) {
+      Promise.resolve(chrome.runtime.sendMessage({ type: "YLD_ABORT_PREPARE", payload: { requestIds } })).catch(() => {});
+    }
+  }
+
   async function requestDubPrepare(payload, onSegment) {
     const requestId = `dub-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    state.activePrepareIds.add(requestId);
     let progress = Promise.resolve(), progressError;
     if (onSegment) prepareProgress.set(requestId, item => {
       progress = progress.then(() => onSegment(item)).catch(error => { progressError = error; });
@@ -1548,7 +1579,10 @@
         throw error;
       }
       return response.payload || {};
-    } finally { prepareProgress.delete(requestId); }
+    } finally {
+      state.activePrepareIds.delete(requestId);
+      prepareProgress.delete(requestId);
+    }
   }
 
   async function ensureBackendReady(backendUrl) {
@@ -2667,11 +2701,17 @@
   }
 
   function maybeExpandTranscriptCoverage(videoTime) {
-    if (!state.running || state.transcriptExpanding || (!state.sourceSegments.length && !state.browserAudioSource && !state.bufferedAudioSource)) {
+    if (!state.running || state.video?.ended || state.transcriptExpanding || (!state.sourceSegments.length && !state.browserAudioSource && !state.bufferedAudioSource)) {
       return;
     }
 
     const missingCurrentWindow = state.transcriptWindows.length > 0 && !isTranscriptKnownAt(videoTime);
+    const pausedIdle = Boolean(
+      state.video?.paused && !state.video.ended && !state.playbackHold && !state.startupPreparing && !state.resumeVideoAfterPrepare
+    );
+    if (pausedIdle && !missingCurrentWindow) {
+      return;
+    }
     const lastEnd = state.transcriptWindows.length ? getKnownTranscriptEndAt(videoTime) : getLastSegmentEnd(state.sourceSegments);
     const videoEnd = Math.min(STT_MAX_DURATION_SECONDS, state.video?.duration || Infinity);
     const remainingTranscript = lastEnd - videoTime;
@@ -4324,6 +4364,22 @@
       };
     }
 
+    if (state.video.ended) {
+      if (state.currentAudio && !state.currentAudio.ended) {
+        return {
+          visible: true,
+          tone: "tail",
+          title: "🔊 마지막 문장 마무리 중",
+          detail: "마지막 더빙 문장이 끝나면 대기 상태로 전환됩니다",
+          progress: 92,
+          actionLabel: "",
+          actionKind: "",
+          compact: false,
+        };
+      }
+      return { visible: false, tone: "idle", title: "", detail: "", progress: null, actionLabel: "", actionKind: "", compact: false };
+    }
+
     if (state.video.paused && !state.video.ended) {
       const currentReady = state.prepared.some(item => videoTime >= item.start - PREPARE_LEAD_SECONDS && videoTime < item.end);
       const noCaptionNow = !hasDubbedCaptionAt(videoTime);
@@ -4402,8 +4458,55 @@
     return hud;
   }
 
+  function computeActionIconState(ui = computePlaybackUiState()) {
+    const mode = els.panel?.dataset?.mode || "local";
+    if (state.connectionLost || state.status === "error") {
+      return { state: "error", hq: false, mode, clipLabel: "", detail: state.lastError || "오류 발생" };
+    }
+    if (state.status === "testing") {
+      return { state: "preparing", hq: false, mode, clipLabel: "", detail: "연결 및 음성 테스트 중" };
+    }
+    if (!state.running) {
+      if (state.pendingAutoContinue && state.autoContinue) {
+        return { state: "preparing", hq: false, mode, clipLabel: "", detail: "다음 영상 자동 더빙 준비 중" };
+      }
+      if (state.autoContinue && (state.videoId || getVideoId())) {
+        return { state: "auto", hq: false, mode, clipLabel: "", detail: "" };
+      }
+      return { state: "idle", hq: false, mode, clipLabel: "", detail: "" };
+    }
+    if (state.video?.ended && (!state.currentAudio || state.currentAudio.ended)) {
+      return { state: state.autoContinue ? "auto" : "idle", hq: false, mode, clipLabel: "", detail: "" };
+    }
+    if (ui.tone === "paused") {
+      return { state: "paused", hq: false, mode, clipLabel: "", detail: "" };
+    }
+    if (ui.tone === "preparing") {
+      return { state: "preparing", hq: false, mode, clipLabel: "", detail: state.captureProcessing ? "원음 인식 중" : "자막 및 더빙 음성 준비 중" };
+    }
+    if (ui.tone === "tail") {
+      return { state: "tail", hq: false, mode, clipLabel: "", detail: "" };
+    }
+    const playingItem = state.currentChunkIndex >= 0 ? state.prepared.find(item => item.chunkIndex === state.currentChunkIndex) : null;
+    const hq = playingItem?.ttsModel === "gpt-realtime-2.1";
+    const clipLabel = state.currentChunkIndex >= 0 && state.chunks.length ? `${state.currentChunkIndex + 1}/${state.chunks.length}` : "";
+    return { state: "playing", hq, mode, clipLabel, detail: "" };
+  }
+
+  function syncActionIconState(ui) {
+    if (state.connectionLost || typeof chrome?.runtime?.sendMessage !== "function" || !hasRuntimeConnection()) {
+      return;
+    }
+    const actionState = computeActionIconState(ui);
+    const nextKey = `${actionState.state}|${actionState.hq ? 1 : 0}|${actionState.mode}|${actionState.clipLabel}|${actionState.detail}`;
+    if (nextKey === state.lastActionStateKey) return;
+    state.lastActionStateKey = nextKey;
+    Promise.resolve(chrome.runtime.sendMessage({ type: "YLD_ACTION_STATE", payload: actionState })).catch(() => {});
+  }
+
   function renderPlaybackStateUi() {
     const ui = computePlaybackUiState();
+    syncActionIconState(ui);
     const uiKey = JSON.stringify(ui);
     if (uiKey === state.lastRenderedUiKey && (!ui.visible || els.videoHud?.isConnected)) {
       return;

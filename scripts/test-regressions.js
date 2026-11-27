@@ -101,9 +101,10 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
 async function contentFixture(overrides = {}) {
   const source = await readFile('extension/content.js', 'utf8');
   const video = { currentTime: 0, volume: 0.8, muted: false, paused: false, ended: false, playbackRate: 1, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } };
-  const context = vm.createContext({ chrome: {runtime: {id:"fixture"}}, window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
+  const runtime = { id: "fixture", ...(overrides.runtimeSend ? { sendMessage: overrides.runtimeSend } : {}) };
+  const context = vm.createContext({ chrome: { runtime }, window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
   const injection = `
-    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue };
+    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, computeActionIconState, renderPlaybackStateUi, requestDubPrepare, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue };
     state.videoId = 'abcdefghijk'; state.lastKnownVideoId = 'abcdefghijk'; state.video = video;
     if (overrides.videoIdFn) getVideoId = overrides.videoIdFn;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
@@ -1029,4 +1030,95 @@ test('paused state stays completely stable without status/detail oscillation whe
   assert.match(seekReadyDetail, /준비 완료 ✓/);
   assert.equal(f.computePlaybackUiState(Date.now() + 20000).detail, seekReadyDetail);
   f.stopDub();
+});
+
+test('idle/paused/ended states spend zero rolling lookahead tokens and Stop aborts in-flight prepare requests', async () => {
+  const prepareCalls = [];
+  let expandCalls = 0;
+  const runtimeMessages = [];
+  let pendingDubGate = null;
+
+  const f = await contentFixture({
+    expand: async () => { expandCalls++; return true; },
+    runtimeSend: async msg => {
+      runtimeMessages.push(msg);
+      if (msg.type === 'YLD_PREPARE_DUB' && pendingDubGate) {
+        return pendingDubGate.promise;
+      }
+      return { ok: true, payload: { segments: [] } };
+    },
+    prepare: async payload => {
+      prepareCalls.push({
+        indexes: payload.segments.map(s => s.index),
+        bufferAhead: { ...payload.bufferAhead },
+      });
+      return { segments: payload.segments.map(s => ({ ...s, audioUrl: 'paused-test.wav' })) };
+    },
+  });
+
+  f.state.running = true;
+  f.state.sourceSegments = Array.from({ length: 8 }, (_, i) => ({ start: i * 5, end: i * 5 + 4, text: `line ${i}` }));
+  f.state.chunks = f.state.sourceSegments.map((s, index) => ({ index, ...s, segments: [s] }));
+  const readyAudio = { paused: true, ended: false, currentTime: 1, duration: 4, pause() { this.paused = true; } };
+  f.state.prepared = [{ chunkIndex: 0, start: 0, end: 4, ttsModel: 'gpt-realtime-2.1-mini', audio: readyAudio }];
+  f.state.preparedChunkIndexes = new Set([0]);
+
+  // 1) Paused on an already-prepared clip (t = 1s): 0 rolling lookahead clips, 0 transcript expansions.
+  f.video.currentTime = 1;
+  f.video.paused = true;
+  f.maybePrepareMoreAudio(1, 'timer');
+  f.maybeExpandTranscriptCoverage(1);
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(prepareCalls.length, 0);
+  assert.equal(expandCalls, 0);
+
+  // 2) Paused on a silent gap (t = 4.5s, between [0..4] and [5..9]): 0 requests.
+  f.video.currentTime = 4.5;
+  f.maybePrepareMoreAudio(4.5, 'timer');
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(prepareCalls.length, 0);
+
+  // 3) Seeking while paused onto an uncovered clip (chunk 3 at t = 16s): prepares ONLY that 1 clip with zeroed bufferAhead (no HQ 2.1), then stops!
+  f.video.currentTime = 16;
+  f.maybePrepareMoreAudio(16, 'seek');
+  await new Promise(r => setTimeout(r, 15));
+  assert.equal(prepareCalls.length, 1);
+  assert.deepEqual(prepareCalls[0].indexes, [3]);
+  assert.deepEqual(prepareCalls[0].bufferAhead, { seconds: 0, clips: 0 });
+
+  // 4) Ended video: 0 prepare or expansion calls.
+  f.video.ended = true;
+  f.video.paused = true;
+  f.maybePrepareMoreAudio(16, 'timer');
+  f.maybeExpandTranscriptCoverage(16);
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(prepareCalls.length, 1);
+  assert.equal(expandCalls, 0);
+
+  // 5) Action icon state deduplicates per-second ticks and Stop aborts in-flight YLD_PREPARE_DUB immediately.
+  f.video.ended = false;
+  f.video.paused = false;
+  f.state.currentChunkIndex = 0;
+  f.state.currentAudio = { ...readyAudio, paused: false };
+  f.state.prepared[0].ttsModel = 'gpt-realtime-2.1';
+  runtimeMessages.length = 0;
+  f.renderPlaybackStateUi();
+  f.video.currentTime = 2.5;
+  f.renderPlaybackStateUi();
+  const actionUpdates = runtimeMessages.filter(m => m.type === 'YLD_ACTION_STATE');
+  assert.equal(actionUpdates.length, 1);
+  assert.equal(actionUpdates[0].payload.state, 'playing');
+  assert.equal(actionUpdates[0].payload.hq, true);
+
+  pendingDubGate = deferred();
+  const inFlight = f.requestDubPrepare({ videoId: 'abcdefghijk', segments: [{ index: 5, start: 25, end: 29, text: 'later' }] });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(f.state.activePrepareIds.size, 1);
+  f.stopDub();
+  const aborts = runtimeMessages.filter(m => m.type === 'YLD_ABORT_PREPARE');
+  assert.equal(aborts.length, 1);
+  assert.equal(aborts[0].payload.requestIds.length, 1);
+  assert.equal(runtimeMessages.filter(m => m.type === 'YLD_ACTION_STATE').at(-1).payload.state, 'idle');
+  pendingDubGate.resolve({ ok: false, error: 'Audio preparation cancelled.', retryable: false });
+  await assert.rejects(inFlight, /cancelled/);
 });

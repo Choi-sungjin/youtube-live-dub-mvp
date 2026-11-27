@@ -2,10 +2,13 @@ importScripts("page-probe.js", "panel-action.js");
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
 const NATIVE_HOST_NAME = "com.youtube_live_dub.backend";
+const activePrepares = new Map();
 
 const MESSAGE_HANDLERS = {
   YLD_SHORTCUTS_GET: async () => chrome.commands.getAll(),
   YLD_SHORTCUTS_OPEN: async () => { await chrome.tabs.create({url: "chrome://extensions/shortcuts"}); return {opened:true}; },
+  YLD_ACTION_STATE: updateActionState,
+  YLD_ABORT_PREPARE: abortPrepare,
   YLD_API_SETTINGS_OPEN: openApiSettings,
   YLD_API_SETTINGS: apiSettingsRequest,
   YLD_PAGE_PROBE: executePageProbe,
@@ -20,6 +23,41 @@ const MESSAGE_HANDLERS = {
   YLD_BACKEND_STOP: (payload) => callNativeHost("stop", payload),
   YLD_BACKEND_STATUS: (payload) => callNativeHost("status", payload),
 };
+
+chrome.tabs?.onRemoved?.addListener?.((tabId) => {
+  for (const [requestId, entry] of activePrepares) {
+    if (entry.tabId === tabId) {
+      entry.controller.abort();
+      activePrepares.delete(requestId);
+    }
+  }
+});
+
+async function updateActionState(payload, sender) {
+  if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0) {
+    return { updated: false };
+  }
+  await applyTabActionState(sender.tab.id, payload || {});
+  return { updated: true };
+}
+
+async function abortPrepare(payload, sender) {
+  if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id)) {
+    return { aborted: 0 };
+  }
+  const ids = Array.isArray(payload?.requestIds) ? payload.requestIds.slice(0, 24) : [];
+  let aborted = 0;
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) continue;
+    const entry = activePrepares.get(id);
+    if (entry && entry.tabId === sender.tab.id) {
+      entry.controller.abort();
+      activePrepares.delete(id);
+      aborted += 1;
+    }
+  }
+  return { aborted };
+}
 
 async function executePageProbe(payload, sender) {
   // Bind execution to the sender's document, never a caller-selected tab or code.
@@ -147,65 +185,94 @@ async function prepareDub(payload, sender) {
   const cleanPayload = { ...payload };
   delete cleanPayload.backendUrl;
 
-  const response = await fetch(`${backendUrl}/api/dub/prepare`, {
-    method: "POST",
-    signal: AbortSignal.timeout(90000),
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(cleanPayload),
-  });
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const registry = typeof activePrepares !== "undefined" ? activePrepares : null;
+  const requestId = typeof payload?.requestId === "string" && payload.requestId.length <= 200 ? payload.requestId : "";
+  if (requestId && controller && registry) {
+    registry.set(requestId, { tabId: sender?.tab?.id ?? null, controller });
+  }
 
-  if (payload?.stream === true && response.ok && response.headers.get('content-type')?.includes('application/x-ndjson')) {
-    if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId) throw new Error('Invalid streaming recipient.');
-    const reader = response.body.getReader(), decoder = new TextDecoder();
-    let pending = '', result;
-    while (true) {
-      const chunk = await reader.read();
-      pending += decoder.decode(chunk.value || new Uint8Array(), {stream:!chunk.done});
-      if (pending.length > 2000000) throw new Error('Audio preparation response too large.');
-      let newline;
-      while ((newline = pending.indexOf('\n')) !== -1) {
-        const line = pending.slice(0,newline); pending=pending.slice(newline+1);
-        if (!line) continue;
-        const event = JSON.parse(line);
-        if (event.type === 'error') {
-          const err = new Error(event.error || 'Speech preparation failed.');
-          if (typeof event.retryable === 'boolean') err.retryable = event.retryable;
-          throw err;
+  try {
+    const response = await fetch(`${backendUrl}/api/dub/prepare`, {
+      method: "POST",
+      signal: controller ? AbortSignal.any([controller.signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(cleanPayload),
+    });
+
+    if (payload?.stream === true && response.ok && response.headers.get('content-type')?.includes('application/x-ndjson')) {
+      if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) || sender.frameId !== 0 || !sender.documentId) throw new Error('Invalid streaming recipient.');
+      const reader = response.body.getReader(), decoder = new TextDecoder();
+      const cancelReader = () => { reader.cancel().catch(() => {}); };
+      controller?.signal.addEventListener("abort", cancelReader, { once: true });
+      let pending = '', result;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (controller?.signal.aborted) {
+            const abortErr = new Error("Audio preparation cancelled.");
+            abortErr.retryable = false;
+            throw abortErr;
+          }
+          pending += decoder.decode(chunk.value || new Uint8Array(), {stream:!chunk.done});
+          if (pending.length > 2000000) throw new Error('Audio preparation response too large.');
+          let newline;
+          while ((newline = pending.indexOf('\n')) !== -1) {
+            const line = pending.slice(0,newline); pending=pending.slice(newline+1);
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (event.type === 'error') {
+              const err = new Error(event.error || 'Speech preparation failed.');
+              if (typeof event.retryable === 'boolean') err.retryable = event.retryable;
+              throw err;
+            }
+            if (event.type === 'done') result=event.result;
+            if (event.type === 'segment') await chrome.tabs.sendMessage(sender.tab.id, {
+              type:'YLD_PREPARE_PROGRESS', requestId:payload.requestId, item:event.item,
+            }, {documentId:sender.documentId}).catch(()=>{});
+          }
+          if (chunk.done) break;
         }
-        if (event.type === 'done') result=event.result;
-        if (event.type === 'segment') await chrome.tabs.sendMessage(sender.tab.id, {
-          type:'YLD_PREPARE_PROGRESS', requestId:payload.requestId, item:event.item,
-        }, {documentId:sender.documentId}).catch(()=>{});
+      } finally {
+        controller?.signal.removeEventListener("abort", cancelReader);
       }
-      if (chunk.done) break;
+      if (!result) throw new Error('Incomplete audio preparation stream.');
+      return result;
     }
-    if (!result) throw new Error('Incomplete audio preparation stream.');
-    return result;
-  }
-  const text = await response.text();
-  let json = null;
+    const text = await response.text();
+    let json = null;
 
-  if (text) {
-    try {
-      json = JSON.parse(text);
-    } catch (_error) {
-      throw new Error(`Backend returned non-JSON response (${response.status})`);
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch (_error) {
+        throw new Error(`Backend returned non-JSON response (${response.status})`);
+      }
     }
-  }
 
-  if (!response.ok) {
-    const message =
-      json && (json.error || json.message)
-        ? json.error || json.message
-        : `Backend request failed with HTTP ${response.status}`;
-    const error = new Error(message);
-    if (typeof json?.retryable === "boolean") error.retryable = json.retryable;
+    if (!response.ok) {
+      const message =
+        json && (json.error || json.message)
+          ? json.error || json.message
+          : `Backend request failed with HTTP ${response.status}`;
+      const error = new Error(message);
+      if (typeof json?.retryable === "boolean") error.retryable = json.retryable;
+      throw error;
+    }
+
+    return json || {};
+  } catch (error) {
+    if (controller?.signal.aborted) {
+      const abortErr = new Error("Audio preparation cancelled.");
+      abortErr.retryable = false;
+      throw abortErr;
+    }
     throw error;
+  } finally {
+    if (requestId && registry) registry.delete(requestId);
   }
-
-  return json || {};
 }
 
 async function fetchAudio(payload) {

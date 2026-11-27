@@ -283,3 +283,41 @@ test('gpt-realtime-2.1 HQ promotion fires probabilistically only when buffer que
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('aborted OpenAI translation and Realtime voice stop immediately without retrying or launching queued segments', async () => {
+  const controller = new AbortController();
+  let fetchCalls = 0;
+  const fetchImpl = async (_url, init) => {
+    fetchCalls++;
+    await new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+      queueMicrotask(() => controller.abort());
+    });
+  };
+  const segments = [0, 1, 2, 3].map(index => ({ index, start: index * 3, end: index * 3 + 3, text: `seg ${index}` }));
+  await assert.rejects(
+    translateOpenAI(segments, { targetLang: 'ko' }, {}, { fetchImpl, apiKey: 'test-only', concurrency: 1, retryDelaysMs: [0, 0], signal: controller.signal }),
+    err => err.aborted === true && err.retryable === false
+  );
+  assert.equal(fetchCalls, 1);
+
+  const voiceAbort = new AbortController();
+  let wsTerminated = 0;
+  class HangingSocket extends EventEmitter {
+    readyState = 0;
+    constructor() {
+      super();
+      queueMicrotask(() => voiceAbort.abort());
+    }
+    close() { this.readyState = 3; }
+    terminate() { wsTerminated++; this.readyState = 3; }
+  }
+  await assert.rejects(
+    synthesizeOpenAISpeech(
+      { text: '중단 테스트', settings: { voice: 'marin' }, outputPath: path.join(tmpdir(), 'never-written-abort.wav'), signal: voiceAbort.signal },
+      { apiKey: 'test-only', Socket: HangingSocket, retryDelaysMs: [0, 0] }
+    ),
+    err => err.aborted === true && err.retryable === false
+  );
+  assert.equal(wsTerminated, 1);
+});

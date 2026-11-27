@@ -4,11 +4,11 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const code=readFileSync(new URL('../extension/panel-action.js',import.meta.url),'utf8');
 function fixture(replies=[{ok:true,payload:{version:'0.8.4'}}]){
- const calls={messages:[],scripts:[],css:0,reloads:[],created:[],badge:[]};let handler;
+ const calls={messages:[],scripts:[],css:0,reloads:[],created:[],badge:[],badgeBg:[],titles:[],icons:[]};let handler;
  const c=vm.createContext({URL,chrome:{
   commands:{onCommand:{addListener:()=>{}}},
   runtime:{getManifest:()=>({version:'0.8.4'}),getURL:p=>'chrome-extension://fixture/'+p},
-  action:{onClicked:{addListener:f=>handler=f},setBadgeText:async x=>calls.badge.push(x),setTitle:async()=>{}},
+  action:{onClicked:{addListener:f=>handler=f},setBadgeText:async x=>calls.badge.push(x),setBadgeBackgroundColor:async x=>calls.badgeBg.push(x),setBadgeTextColor:async()=>{},setTitle:async x=>calls.titles.push(x),setIcon:async x=>calls.icons.push(x)},
   tabs:{sendMessage:async(id,message)=>{calls.messages.push(message);const r=replies[Math.min(calls.messages.length-1,replies.length-1)];if(r instanceof Error)throw r;return r;},reload:async id=>calls.reloads.push(id),create:async x=>calls.created.push(x)},
   scripting:{insertCSS:async()=>calls.css++,executeScript:async x=>calls.scripts.push(x)},
  }});vm.runInContext(code,c);return{c,calls,handler};
@@ -84,4 +84,31 @@ test('panel shortcut toggles twice in order without starting or stopping dubbing
  const f=fixture();await Promise.all([f.c.runDubbingCommand('yld-panel',tab),f.c.runDubbingCommand('yld-panel',tab)]);
  assert.deepEqual(f.calls.messages.map(m=>m.type),['YLD_PANEL_STATUS','YLD_PANEL_TOGGLE','YLD_PANEL_STATUS','YLD_PANEL_TOGGLE']);
  assert.equal(f.calls.reloads.length,0);
+});
+
+test('toolbar icon displays live execution badges/tooltips and preserves active badge when opening panel',async()=>{
+ const f=fixture([{ok:true,payload:{version:'0.8.4',actionState:{state:'playing',hq:false,mode:'gpt',clipLabel:'3/12'}}}]);
+ await f.c.applyTabActionState(7,{state:'preparing',detail:'첫 더빙 준비 중'});
+ assert.equal(f.calls.badge.at(-1).text,'...');
+ assert.equal(f.calls.badgeBg.at(-1).color,'#2563eb');
+ assert.match(f.calls.titles.at(-1).title,/\[준비 중\]/);
+
+ await f.c.applyTabActionState(7,{state:'playing',hq:true,mode:'gpt',clipLabel:'2/12'});
+ assert.equal(f.calls.badge.at(-1).text,'HQ');
+ assert.equal(f.calls.badgeBg.at(-1).color,'#7c3aed');
+ assert.match(f.calls.titles.at(-1).title,/HQ 2\.1.*클립 2\/12.*모두 GPT/);
+
+ await f.c.applyTabActionState(7,{state:'paused'});
+ assert.equal(f.calls.badge.at(-1).text,'II');
+ assert.equal(f.calls.badgeBg.at(-1).color,'#d97706');
+ assert.match(f.calls.titles.at(-1).title,/대기 중 추가 토큰 소모 없음/);
+
+ // Opening panel while actively playing keeps 'ON' instead of clearing badge to ''
+ await f.c.openPanelFromAction(tab);
+ assert.equal(f.calls.badge.at(-1).text,'ON');
+ assert.equal(f.calls.badgeBg.at(-1).color,'#059669');
+
+ await f.c.applyTabActionState(7,{state:'idle'});
+ assert.equal(f.calls.badge.at(-1).text,'');
+ assert.deepEqual(JSON.parse(JSON.stringify(f.calls.icons.at(-1).path)),{16:'icons/icon-16.png',32:'icons/icon-32.png'});
 });

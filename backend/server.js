@@ -40,6 +40,7 @@ const ZAI_CHAT_COMPLETIONS_URL = 'https://api.z.ai/api/paas/v4/chat/completions'
 const SUPERTONE_TTS_URL = 'https://supertoneapi.com/v1/text-to-speech';
 const MAX_TTS_CHARS = 300;
 const PREPROCESS_JOBS = new Map();
+const IN_FLIGHT_CLIPS = new Map();
 const TRANSLATION_CACHE = new Map();
 const TRANSLATION_DISK_CACHE = createDiskTextCache(path.join(CACHE_DIR, 'translations'));
 const MAX_TRANSLATION_CACHE_ITEMS = 5000;
@@ -135,22 +136,40 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/dub/prepare') {
       const body = await readJson(req);
+      const reqAbort = new AbortController();
+      const onDisconnect = () => {
+        if (!res.writableEnded) reqAbort.abort();
+      };
+      res.on('close', onDisconnect);
       if (body.stream === true) {
         res.writeHead(200, {'Content-Type':'application/x-ndjson', 'Cache-Control':'no-store'});
         try {
           const result = await prepareDub(body, undefined, item => {
-            if (!res.destroyed) res.write(JSON.stringify({type:'segment',item})+'\n');
-          });
-          if (!res.destroyed) res.end(JSON.stringify({type:'done',result})+'\n');
+            if (!res.destroyed && !reqAbort.signal.aborted) res.write(JSON.stringify({type:'segment',item})+'\n');
+          }, { signal: reqAbort.signal });
+          if (process.env.YLD_AUDIT === '1') await appendFile(path.join(AUDIT_DIR, `${hashValue(result.videoId)}.jsonl`), JSON.stringify({ at: new Date().toISOString(), stream: true, ...result }) + '\n');
+          if (!res.destroyed && !reqAbort.signal.aborted) res.end(JSON.stringify({type:'done',result})+'\n');
         } catch (error) {
+          if (error?.aborted || reqAbort.signal.aborted) {
+            if (!res.destroyed) res.end();
+            return;
+          }
           const retryable = typeof error.retryable === 'boolean' ? error.retryable : (error.statusCode || 500) >= 500 && error.statusCode !== 503;
           if (!res.destroyed) res.end(JSON.stringify({type:'error',error:error.message,retryable})+'\n');
         }
         return;
       }
-      const result = await prepareDub(body);
-      if (process.env.YLD_AUDIT === '1') await appendFile(path.join(AUDIT_DIR, `${hashValue(result.videoId)}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n');
-      json(res, 200, result);
+      try {
+        const result = await prepareDub(body, undefined, undefined, { signal: reqAbort.signal });
+        if (process.env.YLD_AUDIT === '1') await appendFile(path.join(AUDIT_DIR, `${hashValue(result.videoId)}.jsonl`), JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n');
+        if (!res.destroyed && !reqAbort.signal.aborted) json(res, 200, result);
+      } catch (error) {
+        if (error?.aborted || reqAbort.signal.aborted) {
+          if (!res.destroyed) res.end();
+          return;
+        }
+        throw error;
+      }
       return;
     }
 
@@ -281,7 +300,17 @@ function providerInfo() {
   };
 }
 
-async function prepareDub(body, mediaTranscript, onPrepared) {
+function dubAbortedError() {
+  const error = new Error('Dub preparation cancelled by client.');
+  error.aborted = true;
+  error.retryable = false;
+  error.statusCode = 499;
+  return error;
+}
+
+async function prepareDub(body, mediaTranscript, onPrepared, options = {}) {
+  const signal = options?.signal || null;
+  if (signal?.aborted) throw dubAbortedError();
   const requestStarted = performance.now();
   const timings = {};
   const videoId = String(body?.videoId || '').trim();
@@ -342,7 +371,7 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
     : limitedSegments.map(() => Promise.resolve(null));
   const translationStarted = performance.now();
   const translationFallbacks = new Map();
-  const translationRun = translateSegments(limitedSegments, settings, timings, translationFallbacks, notifyTranslated)
+  const translationRun = translateSegments(limitedSegments, settings, timings, translationFallbacks, notifyTranslated, { signal })
     .then(map => {
       timings.translationMs = Math.round(performance.now() - translationStarted);
       for (const segment of limitedSegments) {
@@ -367,11 +396,13 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
 
   const [preparedItems] = await Promise.all([
     mapLimit(limitedSegments, ttsConcurrency, async (segment) => {
+      if (signal?.aborted) throw dubAbortedError();
       const segmentPos = limitedSegments.indexOf(segment);
       const [translation, speaker] = await Promise.all([
         segmentTranslations.get(segment.index).promise,
         speakerPromises[segmentPos],
       ]);
+      if (signal?.aborted) throw dubAbortedError();
       const speechSettings = {...settings, voice: selectSpeakerVoice(settings, speaker)};
       if (!translation) throw httpError(502, `Translation missing for segment ${segment.index}.`);
     // Local translation has already shortened and checked required facts. Do not
@@ -396,12 +427,29 @@ async function prepareDub(body, mediaTranscript, onPrepared) {
       return { settings: ttsSettings, synthesisText, id, audioPath: path.join(AUDIO_DIR, `${id}.wav`) };
     };
     const cachedClip = async clip => await fileExists(clip.audioPath) ? { hit: true, duration: wavDuration(await readFile(clip.audioPath)) } : null;
-    const synthesizeClip = async clip => ({ hit: false, ...await synthesizeSpeech({
-      text: clip.synthesisText,
-      duration: sourceDuration,
-      settings: clip.settings,
-      outputPath: clip.audioPath
-    }) });
+    const inFlightClips = (prepareDub._inFlightClips ||= new Map());
+    const synthesizeClip = async clip => {
+      if (signal?.aborted) throw dubAbortedError();
+      const existing = inFlightClips.get(clip.id);
+      if (existing) {
+        try {
+          return { hit: true, ...(await existing) };
+        } catch (err) {
+          if (!err?.aborted || signal?.aborted) throw err;
+        }
+      }
+      const run = synthesizeSpeech({
+        text: clip.synthesisText,
+        duration: sourceDuration,
+        settings: clip.settings,
+        outputPath: clip.audioPath,
+        signal
+      }).finally(() => {
+        if (inFlightClips.get(clip.id) === run) inFlightClips.delete(clip.id);
+      });
+      inFlightClips.set(clip.id, run);
+      return { hit: false, ...(await run) };
+    };
 
     let clip = clipFor(speechSettings);
     let voiceFallback = '';
@@ -910,7 +958,9 @@ async function preferOpenAI(useOpenAI, useLocal) {
   }
 }
 
-async function translateSegments(segments, settings, metrics = {}, fallbacks = new Map(), onSegmentTranslated = null) {
+async function translateSegments(segments, settings, metrics = {}, fallbacks = new Map(), onSegmentTranslated = null, options = {}) {
+  const signal = options?.signal || null;
+  if (signal?.aborted) throw dubAbortedError();
   const provider = activeTranslationProvider(settings);
   const translated = new Map();
   const missing = [];
@@ -954,8 +1004,10 @@ async function translateSegments(segments, settings, metrics = {}, fallbacks = n
       const { value, fallback } = await preferOpenAI(
         () => translateOpenAI(missing, settings, metrics, {
           onSegmentTranslated: (segment, text) => emitSegment('openai', segment, text),
+          signal,
         }),
         async () => {
+          if (signal?.aborted) throw dubAbortedError();
           const remaining = missing.filter(segment => !earlyCached.has(segment.index));
           if (!remaining.length) return new Map();
           return LOCAL_TRANSLATOR.translate(remaining, settings, metrics);
@@ -1093,8 +1145,9 @@ async function requestZaiTranslation(promptPayload) {
   throw httpError(lastStatus || 500, `Z.ai Chat Completions API failed: ${trimForError(lastBody)}`);
 }
 
-async function synthesizeSpeech({ text, duration, settings, outputPath }) {
-  if (settings.ttsProvider === 'openai-realtime') return synthesizeOpenAISpeech({ text, settings, outputPath });
+async function synthesizeSpeech({ text, duration, settings, outputPath, signal = null }) {
+  if (signal?.aborted) throw dubAbortedError();
+  if (settings.ttsProvider === 'openai-realtime') return synthesizeOpenAISpeech({ text, settings, outputPath, signal });
   if (settings.ttsProvider === 'supertonic3') return synthesizeSupertonicSpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'windows-sapi') return synthesizeWindowsSpeech({ text, settings, outputPath });
   if (settings.ttsProvider === 'supertone' && !process.env.SUPERTONE_API_KEY) {
