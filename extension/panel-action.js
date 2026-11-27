@@ -223,7 +223,7 @@ function savePanelReloadPosition() {
       videoId:new URL(location.href).searchParams.get('v'),time:Number(video?.currentTime)||0,savedAt:Date.now(),
       mode:panel?.dataset.mode || 'local',voice:panel?.querySelector('[data-yld-voice]')?.value || 'auto',
       playbackSpeed:Number(panel?.querySelector('[data-yld-speed]')?.value)||1,
-      lang:panel?.querySelector('[data-yld-lang]')?.value || 'ko',volume:Number(panel?.querySelector('[data-yld-volume]')?.value ?? 35),autoStart:false,
+      lang:panel?.querySelector('[data-yld-lang]')?.value || 'ko',volume:Number(panel?.querySelector('[data-yld-volume]')?.value ?? 75),autoStart:false,
     }));
     localStorage.setItem('yld-panel-visible','true');
   } catch { /* The explicit reload still removes stale content scripts. */ }

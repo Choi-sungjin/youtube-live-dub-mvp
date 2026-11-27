@@ -102,9 +102,9 @@ async function contentFixture(overrides = {}) {
   const source = await readFile('extension/content.js', 'utf8');
   const video = { currentTime: 0, volume: 0.8, muted: false, paused: false, ended: false, playbackRate: 1, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } };
   const runtime = { id: "fixture", ...(overrides.runtimeSend ? { sendMessage: overrides.runtimeSend } : {}) };
-  const context = vm.createContext({ chrome: { runtime }, window: {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
+  const context = vm.createContext({ chrome: { runtime }, window: overrides.window || {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
   const injection = `
-    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, computeActionIconState, renderPlaybackStateUi, requestDubPrepare, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue };
+    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, computeActionIconState, renderPlaybackStateUi, requestDubPrepare, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue, applyOriginalVolume, getSavedOriginalVolume, saveOriginalVolume, getSavedSfxPreserve, setSfxPreserve, ensureVocalSuppressorGraph };
     state.videoId = 'abcdefghijk'; state.lastKnownVideoId = 'abcdefghijk'; state.video = video;
     if (overrides.videoIdFn) getVideoId = overrides.videoIdFn;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
@@ -113,7 +113,7 @@ async function contentFixture(overrides = {}) {
     refreshPageState=()=>{}; setStatus=value=>{state.status=value}; updateMeta=()=>{};
     ensureBackendReady=overrides.health || (async()=>({ok:true}));
     collectCaptionSegments=overrides.captions || (async()=>[{start:0,end:10,text:'A sentence'}]);
-    applyOriginalVolume=()=>{state.video.volume=0.35};
+    if (!overrides.realVolume) applyOriginalVolume=()=>{state.video.volume=0.35};
     alignVideoToAvailableCaptions=()=>{}; maybeExpandTranscriptCoverage=()=>{};
     if (overrides.expand) { expandTranscriptCoverage=overrides.expand; cleanCaptionText=text=>String(text).trim(); }
     maybePrepareMoreAudio=()=>{};
@@ -1121,4 +1121,112 @@ test('idle/paused/ended states spend zero rolling lookahead tokens and Stop abor
   assert.equal(runtimeMessages.filter(m => m.type === 'YLD_ACTION_STATE').at(-1).payload.state, 'idle');
   pendingDubGate.resolve({ ok: false, error: 'Audio preparation cancelled.', retryable: false });
   await assert.rejects(inFlight, /cancelled/);
+});
+
+test('original volume persists across sessions and Mid/Side vocal suppressor mutes speech while keeping SFX audible', async () => {
+  const store = new Map();
+  let mediaSourcesCreated = 0;
+  let createdGains = [];
+  class MockParam {
+    constructor(v) { this.value = v; }
+    cancelScheduledValues() {}
+    setTargetAtTime(v) { this.value = v; }
+  }
+  class MockNode {
+    constructor(initGain = 1) {
+      this.gain = new MockParam(initGain);
+      this.frequency = new MockParam(350);
+      this.Q = new MockParam(1);
+      this.connections = [];
+    }
+    connect(dest, outIdx = 0, inIdx = 0) { this.connections.push({ dest, outIdx, inIdx }); return dest; }
+  }
+  class MockAudioContext {
+    state = 'running';
+    currentTime = 1.5;
+    destination = new MockNode();
+    createMediaElementSource() { mediaSourcesCreated++; return new MockNode(); }
+    createGain() { const g = new MockNode(1); createdGains.push(g); return g; }
+    createChannelSplitter() { return new MockNode(); }
+    createChannelMerger() { return new MockNode(); }
+    createBiquadFilter() { return new MockNode(0); }
+    resume() { this.state = 'running'; return Promise.resolve(); }
+  }
+
+  const mockWindow = {
+    localStorage: {
+      getItem: k => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+    },
+    AudioContext: MockAudioContext,
+  };
+
+  // 1) Persistent original volume & SFX-preserve toggle across sessions
+  const f = await contentFixture({ realVolume: true, window: mockWindow });
+  assert.equal(f.getSavedOriginalVolume(), 75);
+  assert.equal(f.getSavedSfxPreserve(), true);
+  f.saveOriginalVolume(62);
+  assert.equal(store.get('yld-original-volume'), '62');
+
+  const f2 = await contentFixture({ realVolume: true, window: { localStorage: mockWindow.localStorage, AudioContext: MockAudioContext } });
+  assert.equal(f2.getSavedOriginalVolume(), 62);
+  f2.els.volume.value = '62';
+
+  // 2) Active dubbing with Mid/Side Web Audio DSP: speech mutes center vocals (-28 dB + 0.2 gain) while Side SFX stays 1.0
+  f2.state.running = true;
+  f2.state.originalVideoVolume = 0.9;
+  f2.state.originalMuted = false;
+  f2.state.chunks = [{ index: 0, start: 2, end: 6, text: 'Spoken line' }];
+  f2.video.currentTime = 3; // Inside spoken caption [2..6]
+  f2.applyOriginalVolume();
+
+  const graph = f2.ensureVocalSuppressorGraph(f2.video);
+  assert.equal(mediaSourcesCreated, 1, 'createMediaElementSource must be called only once per video element');
+  assert.equal(createdGains[1].channelCount, 2, 'mono videos must explicitly upmix to 2ch before splitter so mono speech never leaks into Side');
+  assert.equal(createdGains[1].channelCountMode, 'explicit');
+  assert.equal(graph.bypassGain.gain.value, 0);
+  assert.equal(graph.processedGain.gain.value, 1);
+  assert.equal(graph.vocalCutLow.gain.value, -26);
+  assert.equal(graph.vocalCutPresence.gain.value, -28);
+  assert.equal(graph.vocalCutHigh.gain.value, -28);
+  assert.equal(graph.midGain.gain.value, 0.2);
+  assert.equal(graph.sideGain.gain.value, 1);
+  assert.equal(f2.video.volume, 0.62);
+
+  // 3) Non-speech SFX interval ('대사 대기', t = 8s): full uncolored original audio restored (0 dB cut, midGain = 1, sideGain = 1)
+  f2.video.currentTime = 8;
+  f2.applyOriginalVolume();
+  assert.equal(graph.vocalCutPresence.gain.value, 0);
+  assert.equal(graph.midGain.gain.value, 1);
+  assert.equal(graph.sideGain.gain.value, 1);
+  assert.equal(f2.video.volume, 0.62);
+
+  // 4) Toggling SFX-preserve OFF switches DSP to clean bypass while persisting setting
+  f2.setSfxPreserve(false);
+  assert.equal(store.get('yld-sfx-preserve'), 'false');
+  assert.equal(graph.bypassGain.gain.value, 1);
+  assert.equal(graph.processedGain.gain.value, 0);
+
+  // 5) Re-enable SFX-preserve, then Stop dubbing -> clean bypass + restores pre-dub video volume (0.9)
+  f2.setSfxPreserve(true);
+  f2.video.currentTime = 3;
+  f2.applyOriginalVolume();
+  assert.equal(graph.processedGain.gain.value, 1);
+  f2.stopDub();
+  assert.equal(graph.bypassGain.gain.value, 1);
+  assert.equal(graph.processedGain.gain.value, 0);
+  assert.equal(f2.video.volume, 0.9);
+
+  // 6) Fallback auto-ducking when AudioContext is unavailable: ducks speech to 10% and restores full SFX on silent gaps
+  const fFallback = await contentFixture({ realVolume: true, window: { localStorage: mockWindow.localStorage } });
+  fFallback.els.volume.value = '80';
+  fFallback.state.running = true;
+  fFallback.state.chunks = [{ index: 0, start: 2, end: 6, text: 'Spoken line' }];
+  fFallback.video.currentTime = 3;
+  fFallback.applyOriginalVolume();
+  assert.equal(fFallback.video.volume, 0.08);
+  fFallback.video.currentTime = 8;
+  fFallback.applyOriginalVolume();
+  assert.equal(fFallback.video.volume, 0.8);
+  fFallback.stopDub();
 });

@@ -6,13 +6,15 @@
 
   const PANEL_ID = "yld-panel";
   const VIDEO_HUD_ID = "yld-video-hud";
-  const BUILD_VERSION = "0.9.9";
+  const BUILD_VERSION = "0.9.10";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
   const AUTO_CONTINUE_STORAGE_KEY = "yld-auto-continue";
   const AUTO_CONTINUE_SESSION_KEY = "yld-auto-continue-last-video";
-  const DEFAULT_ORIGINAL_VOLUME = 35;
+  const ORIGINAL_VOLUME_STORAGE_KEY = "yld-original-volume";
+  const SFX_PRESERVE_STORAGE_KEY = "yld-sfx-preserve";
+  const DEFAULT_ORIGINAL_VOLUME = 75;
   const PREPARE_LEAD_SECONDS = 0.18;
   const BUFFER_WINDOW_SECONDS = 90;
   const NEXT_BUFFER_THRESHOLD_SECONDS = 60;
@@ -84,6 +86,7 @@
     lastMetaKey: "",
     activePrepareIds: new Set(),
     uiTimer: null,
+    sfxPreserve: true,
     autoContinue: false,
     lastKnownVideoId: "",
     queuedAutoVideoId: "",
@@ -121,15 +124,18 @@
   const els = {};
   const prepareProgress = new Map();
   const pendingAudioPlays = new WeakMap();
+  const videoAudioGraphs = new WeakMap();
 
   init();
 
   function init() {
     ensurePanel();
+    state.sfxPreserve = getSavedSfxPreserve();
     state.autoContinue = getSavedAutoContinue();
     state.lastKnownVideoId = getVideoId();
     state.recoveryResume = consumeRecovery();
     bindPanelEvents();
+    renderSfxPreserveControls();
     renderAutoContinueControls();
     refreshPageState();
     setStatus("idle");
@@ -210,10 +216,17 @@
 
         <div class="yld-row">
           <label class="yld-label" for="yld-volume">
-            원음 음량
+            <span data-yld-volume-title>효과음·원음 음량</span>
             <span data-yld-volume-label>${DEFAULT_ORIGINAL_VOLUME}%</span>
           </label>
           <input id="yld-volume" class="yld-panel-range" type="range" min="0" max="100" step="1" value="${DEFAULT_ORIGINAL_VOLUME}" data-yld-volume>
+          <button class="yld-auto-continue-toggle yld-is-on" type="button" role="switch" aria-checked="true" data-yld-sfx-preserve>
+            <span class="yld-auto-continue-copy">
+              <strong>🔇 원음 발화만 음소거 · 효과음 유지</strong>
+              <small data-yld-sfx-hint>켜짐 · 말소리는 지우고 효과음·배경음은 살립니다</small>
+            </span>
+            <span class="yld-switch-pill" data-yld-sfx-pill>ON</span>
+          </button>
         </div>
 
         <div class="yld-row-inline">
@@ -339,7 +352,14 @@
     els.backend = panel.querySelector("[data-yld-backend]");
     els.backend.value = getSavedBackendUrl();
     els.volume = panel.querySelector("[data-yld-volume]");
+    els.volumeTitle = panel.querySelector("[data-yld-volume-title]");
     els.volumeLabel = panel.querySelector("[data-yld-volume-label]");
+    const savedVolume = getSavedOriginalVolume();
+    els.volume.value = String(savedVolume);
+    els.volumeLabel.textContent = `${savedVolume}%`;
+    els.sfxPreserve = panel.querySelector("[data-yld-sfx-preserve]");
+    els.sfxHint = panel.querySelector("[data-yld-sfx-hint]");
+    els.sfxPill = panel.querySelector("[data-yld-sfx-pill]");
     els.voice = panel.querySelector("[data-yld-voice]");
     els.lang = panel.querySelector("[data-yld-lang]");
     els.model = panel.querySelector("[data-yld-model]");
@@ -496,18 +516,30 @@
         if (!response?.ok) throw new Error(response?.error || 'API 설정을 열지 못했습니다.');
       } catch (error) { state.lastError = error.message; renderAlert(); }
     });
-    els.start.addEventListener("click", startDub);
+    els.start.addEventListener("click", () => {
+      primeVocalSuppressorFromGesture();
+      void startDub();
+    });
     els.stop.addEventListener("click", stopDub);
     els.autoContinue?.addEventListener("click", () => toggleAutoContinue());
+    els.sfxPreserve?.addEventListener("click", () => {
+      primeVocalSuppressorFromGesture();
+      setSfxPreserve(!state.sfxPreserve);
+    });
     els.stateAction?.addEventListener("click", handlePlaybackBannerAction);
     els.test.addEventListener("click", testBackend);
     els.hide.addEventListener("click", () => setPanelVisible(false));
     els.backend.addEventListener("change", () => saveBackendUrl(els.backend.value));
     els.backend.addEventListener("blur", () => saveBackendUrl(els.backend.value));
-    els.volume.addEventListener("input", () => {
-      els.volumeLabel.textContent = `${els.volume.value}%`;
+    const onVolumeInput = () => {
+      const pct = normalizeVolumePercent(els.volume.value);
+      els.volume.value = String(pct);
+      els.volumeLabel.textContent = `${pct}%`;
+      saveOriginalVolume(pct);
       applyOriginalVolume();
-    });
+    };
+    els.volume.addEventListener("input", onVolumeInput);
+    els.volume.addEventListener("change", onVolumeInput);
     els.diagnostics?.closest?.("details")?.addEventListener("toggle", () => {
       renderPlaybackDiagnostics({ force: true });
     });
@@ -831,10 +863,13 @@
     stopTestAudio();
 
     if (state.video) {
+      updateVocalSuppressorState(state.video, { active: false, speechActive: false });
       if (options.preserveDubVolume) {
         applyOriginalVolume({ force: true });
       } else if (state.originalVideoVolume !== null) {
         state.video.volume = state.originalVideoVolume;
+        const player = typeof document !== "undefined" && typeof document.querySelector === "function" ? document.querySelector("#movie_player") : null;
+        try { player?.setVolume?.(Math.round(state.originalVideoVolume * 100)); } catch (_e) {}
       }
       if (!options.preserveDubVolume && state.originalMuted !== null) {
         state.video.muted = state.originalMuted;
@@ -3902,24 +3937,304 @@
     return match ? match[1] : "application/octet-stream";
   }
 
+  function normalizeVolumePercent(value, fallback = DEFAULT_ORIGINAL_VOLUME) {
+    if (value === null || value === "" || value === undefined) return fallback;
+    const num = Number(value);
+    return Number.isFinite(num) ? Math.max(0, Math.min(100, Math.round(num))) : fallback;
+  }
+
+  function getSavedOriginalVolume() {
+    try {
+      const raw = window.localStorage?.getItem(ORIGINAL_VOLUME_STORAGE_KEY);
+      return normalizeVolumePercent(raw, DEFAULT_ORIGINAL_VOLUME);
+    } catch (_error) {
+      return DEFAULT_ORIGINAL_VOLUME;
+    }
+  }
+
+  function saveOriginalVolume(value) {
+    try {
+      window.localStorage?.setItem(ORIGINAL_VOLUME_STORAGE_KEY, String(normalizeVolumePercent(value)));
+    } catch (_error) {}
+  }
+
+  function getSavedSfxPreserve() {
+    try {
+      const raw = window.localStorage?.getItem(SFX_PRESERVE_STORAGE_KEY);
+      return raw === null ? true : raw === "true";
+    } catch (_error) {
+      return true;
+    }
+  }
+
+  function saveSfxPreserve(enabled) {
+    try {
+      window.localStorage?.setItem(SFX_PRESERVE_STORAGE_KEY, enabled ? "true" : "false");
+    } catch (_error) {}
+  }
+
+  function setSfxPreserve(enabled) {
+    state.sfxPreserve = Boolean(enabled);
+    saveSfxPreserve(state.sfxPreserve);
+    renderSfxPreserveControls();
+    applyOriginalVolume();
+    renderPlaybackDiagnostics();
+  }
+
+  function renderSfxPreserveControls() {
+    const enabled = Boolean(state.sfxPreserve);
+    if (els.sfxPreserve) {
+      els.sfxPreserve.setAttribute("aria-checked", String(enabled));
+      els.sfxPreserve.classList?.toggle("yld-is-on", enabled);
+    }
+    if (els.sfxHint) {
+      els.sfxHint.textContent = enabled
+        ? "켜짐 · 말소리는 지우고 효과음·배경음은 살립니다"
+        : "꺼짐 · 전체 구간을 설정한 원음 음량으로 고정합니다";
+    }
+    if (els.sfxPill) {
+      els.sfxPill.textContent = enabled ? "ON" : "OFF";
+    }
+    if (els.volumeTitle) {
+      els.volumeTitle.textContent = enabled ? "효과음·원음 음량 (자동 저장)" : "원음 음량 (전체 고정 · 자동 저장)";
+    }
+  }
+
+  function getAudioContextConstructor() {
+    if (typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext)) {
+      return window.AudioContext || window.webkitAudioContext;
+    }
+    if (typeof AudioContext === "function") return AudioContext;
+    return null;
+  }
+
+  function smoothAudioParam(param, target, now, timeConstant = 0.05) {
+    if (!param) return;
+    if (typeof param.setTargetAtTime === "function" && Number.isFinite(now)) {
+      param.cancelScheduledValues?.(now);
+      param.setTargetAtTime(target, now, timeConstant);
+    } else {
+      param.value = target;
+    }
+  }
+
+  function ensureVocalSuppressorGraph(video) {
+    if (!video || typeof video !== "object") return null;
+    const existing = videoAudioGraphs.get(video);
+    if (existing) {
+      return existing.failed ? null : existing;
+    }
+    const Ctor = getAudioContextConstructor();
+    if (!Ctor) return null;
+    let ctx = null;
+    try {
+      ctx = new Ctor();
+      const source = ctx.createMediaElementSource(video);
+
+      const bypassGain = ctx.createGain();
+      bypassGain.gain.value = 1;
+      source.connect(bypassGain);
+      bypassGain.connect(ctx.destination);
+
+      // Force 2-channel upmix before Mid/Side split so 1-channel mono videos route 100% into Mid (0% speech leak into Side).
+      const stereoInput = ctx.createGain();
+      stereoInput.gain.value = 1;
+      stereoInput.channelCount = 2;
+      stereoInput.channelCountMode = "explicit";
+      stereoInput.channelInterpretation = "speakers";
+      source.connect(stereoInput);
+
+      const splitter = ctx.createChannelSplitter(2);
+      stereoInput.connect(splitter);
+
+      // Mid = 0.5 * (L + R): carries centered narration/dialogue.
+      const lToMid = ctx.createGain();
+      lToMid.gain.value = 0.5;
+      const rToMid = ctx.createGain();
+      rToMid.gain.value = 0.5;
+
+      const vocalCutLow = ctx.createBiquadFilter();
+      vocalCutLow.type = "peaking";
+      vocalCutLow.frequency.value = 480;
+      vocalCutLow.Q.value = 0.75;
+      vocalCutLow.gain.value = 0;
+
+      const vocalCutPresence = ctx.createBiquadFilter();
+      vocalCutPresence.type = "peaking";
+      vocalCutPresence.frequency.value = 1150;
+      vocalCutPresence.Q.value = 0.85;
+      vocalCutPresence.gain.value = 0;
+
+      const vocalCutHigh = ctx.createBiquadFilter();
+      vocalCutHigh.type = "peaking";
+      vocalCutHigh.frequency.value = 2100;
+      vocalCutHigh.Q.value = 0.70;
+      vocalCutHigh.gain.value = 0;
+
+      const midGain = ctx.createGain();
+      midGain.gain.value = 1;
+
+      splitter.connect(lToMid, 0);
+      splitter.connect(rToMid, 1);
+      lToMid.connect(vocalCutLow);
+      rToMid.connect(vocalCutLow);
+      vocalCutLow.connect(vocalCutPresence);
+      vocalCutPresence.connect(vocalCutHigh);
+      vocalCutHigh.connect(midGain);
+
+      // Side = 0.5 * (L - R): carries stereo SFX, ambience, BGM, and spatial cues.
+      const lToSide = ctx.createGain();
+      lToSide.gain.value = 0.5;
+      const rToSide = ctx.createGain();
+      rToSide.gain.value = -0.5;
+      const sideGain = ctx.createGain();
+      sideGain.gain.value = 1;
+
+      splitter.connect(lToSide, 0);
+      splitter.connect(rToSide, 1);
+      lToSide.connect(sideGain);
+      rToSide.connect(sideGain);
+
+      // Reconstruct stereo: L = Mid + Side, R = Mid - Side.
+      const sideInvertRight = ctx.createGain();
+      sideInvertRight.gain.value = -1;
+      sideGain.connect(sideInvertRight);
+
+      const merger = ctx.createChannelMerger(2);
+      midGain.connect(merger, 0, 0);
+      sideGain.connect(merger, 0, 0);
+      midGain.connect(merger, 0, 1);
+      sideInvertRight.connect(merger, 0, 1);
+
+      const processedGain = ctx.createGain();
+      processedGain.gain.value = 0;
+      merger.connect(processedGain);
+      processedGain.connect(ctx.destination);
+
+      const graph = {
+        ctx,
+        bypassGain,
+        processedGain,
+        vocalCutLow,
+        vocalCutPresence,
+        vocalCutHigh,
+        midGain,
+        sideGain,
+        modeKey: "bypass",
+        failed: false,
+      };
+      if (typeof video.addEventListener === "function") {
+        video.addEventListener("play", () => {
+          if (graph.ctx.state === "suspended") graph.ctx.resume?.().catch?.(() => {});
+        });
+      }
+      videoAudioGraphs.set(video, graph);
+      return graph;
+    } catch (_error) {
+      try { ctx?.close?.(); } catch {}
+      videoAudioGraphs.set(video, { failed: true });
+      return null;
+    }
+  }
+
+  function primeVocalSuppressorFromGesture() {
+    if (!state.sfxPreserve) return;
+    const video = state.video || (typeof document !== "undefined" && typeof document.querySelector === "function"
+      ? (document.querySelector("video.html5-main-video") || document.querySelector("video"))
+      : null);
+    if (!video) return;
+    const graph = ensureVocalSuppressorGraph(video);
+    if (graph?.ctx?.state === "suspended") {
+      graph.ctx.resume?.().catch?.(() => {});
+    }
+  }
+
+  function updateVocalSuppressorState(video, { active, speechActive }) {
+    if (!video || typeof video !== "object") return false;
+    const existing = videoAudioGraphs.get(video);
+    if (!active) {
+      if (existing && !existing.failed) {
+        if (existing.ctx.state === "suspended") existing.ctx.resume?.().catch?.(() => {});
+        if (existing.modeKey !== "bypass") {
+          existing.modeKey = "bypass";
+          const now = existing.ctx.currentTime || 0;
+          smoothAudioParam(existing.bypassGain.gain, 1, now, 0.03);
+          smoothAudioParam(existing.processedGain.gain, 0, now, 0.03);
+          smoothAudioParam(existing.vocalCutLow.gain, 0, now, 0.03);
+          smoothAudioParam(existing.vocalCutPresence.gain, 0, now, 0.03);
+          smoothAudioParam(existing.vocalCutHigh.gain, 0, now, 0.03);
+          smoothAudioParam(existing.midGain.gain, 1, now, 0.03);
+          smoothAudioParam(existing.sideGain.gain, 1, now, 0.03);
+        }
+      }
+      return false;
+    }
+    const graph = ensureVocalSuppressorGraph(video);
+    if (!graph) return false;
+    if (graph.ctx.state === "suspended") {
+      graph.ctx.resume?.().catch?.(() => {});
+      return false;
+    }
+    const nextKey = speechActive ? "suppress-speech" : "full-sfx";
+    if (graph.modeKey !== nextKey) {
+      graph.modeKey = nextKey;
+      const now = graph.ctx.currentTime || 0;
+      smoothAudioParam(graph.bypassGain.gain, 0, now, 0.03);
+      smoothAudioParam(graph.processedGain.gain, 1, now, 0.03);
+      if (speechActive) {
+        smoothAudioParam(graph.vocalCutLow.gain, -26, now, 0.045);
+        smoothAudioParam(graph.vocalCutPresence.gain, -28, now, 0.045);
+        smoothAudioParam(graph.vocalCutHigh.gain, -28, now, 0.045);
+        smoothAudioParam(graph.midGain.gain, 0.2, now, 0.045);
+        smoothAudioParam(graph.sideGain.gain, 1, now, 0.045);
+      } else {
+        smoothAudioParam(graph.vocalCutLow.gain, 0, now, 0.075);
+        smoothAudioParam(graph.vocalCutPresence.gain, 0, now, 0.075);
+        smoothAudioParam(graph.vocalCutHigh.gain, 0, now, 0.075);
+        smoothAudioParam(graph.midGain.gain, 1, now, 0.075);
+        smoothAudioParam(graph.sideGain.gain, 1, now, 0.075);
+      }
+    }
+    return true;
+  }
+
+  function isOriginalSpeechActive(videoTime) {
+    const dubSpeaking = Boolean(state.currentAudio && !state.currentAudio.paused && !state.currentAudio.ended);
+    const captionNow = hasDubbedCaptionAt(videoTime) && !isSkippedClipAt(videoTime);
+    return dubSpeaking || captionNow;
+  }
+
   function applyOriginalVolume(options = {}) {
     if (state.sourceCapture) return;
     if (!state.video || (!state.running && !options.force)) {
       return;
     }
 
+    const nowTime = getVideoTime();
     // A clip left to the original audio plays at the volume the viewer had before dubbing.
-    const originalNow = state.running && state.originalVideoVolume !== null && isSkippedClipAt(getVideoTime());
-    const volumePercent = originalNow ? Math.round(state.originalVideoVolume * 100) : Math.max(0, Math.min(100, Number(els.volume.value) || 0));
-    const muted = originalNow ? Boolean(state.originalMuted) : volumePercent === 0;
+    const originalNow = state.running && state.originalVideoVolume !== null && isSkippedClipAt(nowTime);
+    const sliderPercent = normalizeVolumePercent(els.volume?.value, DEFAULT_ORIGINAL_VOLUME);
+    const basePercent = originalNow ? Math.round(state.originalVideoVolume * 100) : sliderPercent;
+    const useSfxPreserve = Boolean(state.running && state.sfxPreserve && !originalNow && !state.startupPreparing && !state.captureProcessing);
+    const speechActive = useSfxPreserve && isOriginalSpeechActive(nowTime);
+    const dspActive = updateVocalSuppressorState(state.video, { active: useSfxPreserve, speechActive });
 
-    state.video.volume = volumePercent / 100;
+    // When Web Audio DSP is active, keep video.volume steady at basePercent so stereo SFX never pump;
+    // when DSP is unavailable/suspended, fall back to smooth element-volume auto-ducking during speech.
+    const effectivePercent = useSfxPreserve && !dspActive && speechActive
+      ? Math.round(basePercent * 0.1)
+      : basePercent;
+    const muted = originalNow ? Boolean(state.originalMuted) : effectivePercent === 0;
+
+    state.video.volume = effectivePercent / 100;
     state.video.muted = muted;
 
-    const player = document.querySelector("#movie_player");
+    const player = typeof document !== "undefined" && typeof document.querySelector === "function"
+      ? document.querySelector("#movie_player")
+      : null;
     try {
       if (typeof player?.setVolume === "function") {
-        player.setVolume(volumePercent);
+        player.setVolume(effectivePercent);
       }
       if (muted && typeof player?.mute === "function") {
         player.mute();
@@ -4579,7 +4894,7 @@
       `자막 준비: ${finite(getKnownTranscriptEndAt(video?.currentTime || 0))}초까지`,
       `유튜브 페이지 연결: ${state.pageProbeStatus}`,
       `영상: ${finite(video?.currentTime)}초 · ${mode(video)}`,
-      `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"}`,
+      `원본 음량: ${finite((video?.volume ?? 0) * 100)}% · 음소거 ${video?.muted ? "켜짐" : "꺼짐"} · 발화 억제(효과음 유지): ${state.sfxPreserve ? (videoAudioGraphs.get(video)?.modeKey || "활성") : "꺼짐"}`,
       `더빙: ${finite(audio?.currentTime)} / ${finite(audio?.duration)}초 · ${mode(audio)}`,
       `재생 속도: ${finite(audio?.playbackRate)}배 · 사용자 설정 ${getDubSpeed().toFixed(2)}배 · 클립 ${item ? item.chunkIndex + 1 : "—"}`,
       item?.ttsModel ? `음성 엔진: ${item.ttsModel} · 생성 속도 ${finite(item.speechSpeed)}배` : "",
