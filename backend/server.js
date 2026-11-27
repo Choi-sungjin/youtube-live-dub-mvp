@@ -47,8 +47,24 @@ const MAX_TRANSLATION_CACHE_ITEMS = 5000;
 const ZAI_RETRY_DELAYS_MS = [1500, 3500];
 const ZAI_RATE_LIMIT_COOLDOWN_MS = 60_000;
 let zaiRateLimitUntil = 0;
-const LOCAL_TRANSLATOR = createLocalTranslator({ baseUrl: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434', model: process.env.OLLAMA_MODEL || DEFAULT_LOCAL_MODEL });
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
+const BOOT_WARM_OLLAMA = Boolean(process.env.YLD_INSTALLATION_ID) || process.env.YLD_WARM_OLLAMA_ON_BOOT === '1';
+const LOCAL_IDLE_UNLOAD_MS = Math.max(30_000, Number(process.env.YLD_LOCAL_IDLE_UNLOAD_MS || 3 * 60 * 1000));
+const RUNTIME_MODE_FILE = path.join(CACHE_DIR, 'runtime-mode.json');
+const LOCAL_TRANSLATOR = createLocalTranslator({
+  baseUrl: OLLAMA_BASE_URL,
+  model: process.env.OLLAMA_MODEL || DEFAULT_LOCAL_MODEL,
+  initialKillSwitch: !BOOT_WARM_OLLAMA,
+});
 let localTranslationWarmTimer;
+let localIdleUnloadTimer;
+let ollamaLifecycle = Promise.resolve();
+
+function queueOllamaLifecycle(fn) {
+  const next = ollamaLifecycle.catch(() => {}).then(fn);
+  ollamaLifecycle = next.catch(() => {});
+  return next;
+}
 
 const SUPERTONE_VOICES = {
   lowMale: {
@@ -131,6 +147,24 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/settings/openai') {
       res.setHeader('Cache-Control', 'no-store');
       json(res, 200, await apiSettingsHandler(req));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/runtime/mode') {
+      const body = await readJson(req);
+      const modeName = String(body?.mode || '').trim();
+      const resolved = resolveDubbingMode(modeName);
+      await writeFile(RUNTIME_MODE_FILE, JSON.stringify({ mode: modeName, updatedAt: new Date().toISOString() }) + '\n').catch(() => {});
+      if (resolved.translationProvider !== 'ollama') {
+        json(res, 200, await engageOllamaKillSwitch(`mode:${modeName}`));
+        return;
+      }
+      if (body?.active === true) {
+        json(res, 200, await activateLocalOllama({ warmNow: Boolean(body?.warm) }));
+        return;
+      }
+      LOCAL_TRANSLATOR.enable();
+      json(res, 200, { ok: true, mode: modeName, killSwitch: false, standby: true, localTranslation: LOCAL_TRANSLATOR.status() });
       return;
     }
 
@@ -248,14 +282,84 @@ server.listen(PORT, HOST, () => {
   if (activeTtsProvider() === 'supertonic3') warmSupertonic().catch(error => console.warn(error.message));
   if (process.env.YLD_FAST_STT !== '0') warmFastStt().catch(error => console.warn(`Fast STT: ${error.message}`));
   if (speakerStatus().installed && process.env.YLD_SPEAKER_WARM !== '0') warmSpeaker().catch(error => console.warn(`Speaker: ${error.message}`));
-  if (activeTranslationProvider() === 'ollama') {
+  if (BOOT_WARM_OLLAMA && activeTranslationProvider() === 'ollama') {
+    LOCAL_TRANSLATOR.enable();
     LOCAL_TRANSLATOR.warm().catch(error => console.warn(error.message));
-    localTranslationWarmTimer = setInterval(() => LOCAL_TRANSLATOR.warm({ refresh: true }).catch(error => console.warn(error.message)), 10 * 60 * 1000);
-    localTranslationWarmTimer.unref();
+  } else {
+    engageOllamaKillSwitch('boot').catch(() => {});
   }
 });
 
-function closeWorkers() { clearInterval(localTranslationWarmTimer); closeFastStt(); closeSupertonic(); closeSpeaker(); }
+function closeWorkers() { clearInterval(localTranslationWarmTimer); clearTimeout(localIdleUnloadTimer); closeFastStt(); closeSupertonic(); closeSpeaker(); }
+
+function isManagedDubOllamaService() {
+  if (process.platform !== 'linux' || process.env.YLD_MANAGE_OLLAMA_SERVICE === '0') return false;
+  try {
+    const u = new URL(OLLAMA_BASE_URL);
+    return ['127.0.0.1', 'localhost'].includes(u.hostname) && u.port === '11435';
+  } catch {
+    return false;
+  }
+}
+
+function runSystemctlUser(action, unit) {
+  return new Promise(resolve => {
+    const child = spawn('systemctl', ['--user', action, unit], { stdio: 'ignore', windowsHide: true });
+    const timer = setTimeout(() => { try { child.kill(); } catch {} resolve(false); }, 4000);
+    timer.unref?.();
+    child.on('error', () => { clearTimeout(timer); resolve(false); });
+    child.on('close', code => { clearTimeout(timer); resolve(code === 0); });
+  });
+}
+
+function scheduleLocalIdleUnload() {
+  clearTimeout(localIdleUnloadTimer);
+  localIdleUnloadTimer = setTimeout(() => {
+    engageOllamaKillSwitch('idle-timeout').catch(() => {});
+  }, LOCAL_IDLE_UNLOAD_MS);
+  localIdleUnloadTimer.unref?.();
+}
+
+function engageOllamaKillSwitch(reason = 'kill-switch') {
+  clearInterval(localTranslationWarmTimer);
+  localTranslationWarmTimer = undefined;
+  clearTimeout(localIdleUnloadTimer);
+  localIdleUnloadTimer = undefined;
+  return queueOllamaLifecycle(async () => {
+    const unloadResult = await LOCAL_TRANSLATOR.unload({ engageKillSwitch: true });
+    return { ok: true, reason, ...unloadResult, localTranslation: LOCAL_TRANSLATOR.status() };
+  });
+}
+
+function activateLocalOllama({ warmNow = false } = {}) {
+  return queueOllamaLifecycle(async () => {
+    if (isManagedDubOllamaService()) {
+      const tagsUrl = new URL('/api/tags', OLLAMA_BASE_URL).href;
+      let reachable = false;
+      try {
+        const probe = await fetch(tagsUrl, { method: 'GET', signal: AbortSignal.timeout(600) });
+        reachable = probe.ok;
+      } catch {}
+      if (!reachable) {
+        await runSystemctlUser('start', 'youtube-dub-ollama.service');
+        const deadline = Date.now() + 6000;
+        while (Date.now() < deadline) {
+          try {
+            const check = await fetch(tagsUrl, { method: 'GET', signal: AbortSignal.timeout(700) });
+            if (check.ok) break;
+          } catch {}
+          await delay(150);
+        }
+      }
+    }
+    LOCAL_TRANSLATOR.enable();
+    scheduleLocalIdleUnload();
+    if (warmNow) {
+      await LOCAL_TRANSLATOR.warm();
+    }
+    return { ok: true, killSwitch: false, localTranslation: LOCAL_TRANSLATOR.status() };
+  });
+}
 server.on('close', closeWorkers);
 for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
   closeWorkers();
@@ -992,39 +1096,32 @@ async function translateSegments(segments, settings, metrics = {}, fallbacks = n
   };
   try {
     if (provider === 'ollama') {
+      if (typeof activateLocalOllama === 'function') await activateLocalOllama({ warmNow: false });
       providerTranslations = await LOCAL_TRANSLATOR.translate(missing, settings, metrics, {
         onSegmentTranslated: (segment, text) => emitSegment('ollama', segment, text),
       });
-    } else if (provider === 'zai' && process.env.ZAI_API_KEY) {
-      if (Date.now() < zaiRateLimitUntil) {
-        throw httpError(429, 'Z.ai rate limit cooldown is active.');
+      if (typeof scheduleLocalIdleUnload === 'function') scheduleLocalIdleUnload();
+    } else {
+      if (typeof engageOllamaKillSwitch === 'function' && !LOCAL_TRANSLATOR.status().killSwitch) {
+        void engageOllamaKillSwitch(`provider:${provider}`);
       }
-      providerTranslations = await translateSegmentsWithZai(missing, settings);
-    } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
-      const { value, fallback } = await preferOpenAI(
-        () => translateOpenAI(missing, settings, metrics, {
+      if (provider === 'zai' && process.env.ZAI_API_KEY) {
+        if (Date.now() < zaiRateLimitUntil) {
+          throw httpError(429, 'Z.ai rate limit cooldown is active.');
+        }
+        providerTranslations = await translateSegmentsWithZai(missing, settings);
+      } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
+        // Kill-switch guarantee: non-local translation modes never wake or fall back to local Ollama.
+        const value = await translateOpenAI(missing, settings, metrics, {
           onSegmentTranslated: (segment, text) => emitSegment('openai', segment, text),
           signal,
-        }),
-        async () => {
-          if (signal?.aborted) throw dubAbortedError();
-          const remaining = missing.filter(segment => !earlyCached.has(segment.index));
-          if (!remaining.length) return new Map();
-          return LOCAL_TRANSLATOR.translate(remaining, settings, metrics);
         });
-      for (const [idx, text] of value.entries()) providerTranslations.set(idx, text);
-      if (fallback) {
-        // Cache Gemma text under its own provider so it never replays as a GPT translation.
-        usedProvider = 'ollama';
-        metrics.translationFallback = fallback;
-        for (const segment of missing) {
-          if (!earlyCached.has(segment.index)) fallbacks.set(segment.index, fallback);
-        }
+        for (const [idx, text] of value.entries()) providerTranslations.set(idx, text);
+      } else if (provider === 'mock') {
+        providerTranslations = new Map(missing.map(segment => [segment.index, translateMock(segment.text, settings)]));
+      } else {
+        throw httpError(503, `${provider} translation API key is not configured.`);
       }
-    } else if (provider === 'mock') {
-      providerTranslations = new Map(missing.map(segment => [segment.index, translateMock(segment.text, settings)]));
-    } else {
-      throw httpError(503, `${provider} translation API key is not configured.`);
     }
   } catch (error) {
     if (isRateLimitError(error)) {

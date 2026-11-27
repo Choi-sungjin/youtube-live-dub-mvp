@@ -109,16 +109,19 @@ function parseTranslations(content, segments) {
   return output;
 }
 
-export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', model = DEFAULT_LOCAL_MODEL, fetchImpl = fetch } = {}) {
+export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', model = DEFAULT_LOCAL_MODEL, fetchImpl = fetch, initialKillSwitch = false } = {}) {
   const origin = new URL(baseUrl);
   if (origin.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname) || origin.username || origin.password) {
     throw new Error('Local translation requires a loopback Ollama HTTP address.');
   }
   if (/cloud/i.test(model)) throw new Error('A cloud model cannot be used for local translation.');
   let activeModel = model;
+  let killSwitch = Boolean(initialKillSwitch);
+  let activeAbort = null;
   let ready = false, warming = null, warmedMs = null, lastError = '', calls = 0, lastUsedAt = 0;
   const endpoint = new URL('/api/chat', origin).href;
   const tagsEndpoint = new URL('/api/tags', origin).href;
+  const psEndpoint = new URL('/api/ps', origin).href;
 
   async function resolveFallbackModel() {
     try {
@@ -133,6 +136,7 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
   }
 
   async function chat(payload, systemPrompt = SYSTEM_PROMPT) {
+    if (killSwitch) throw new Error('Local Ollama translation is disabled by kill-switch.');
     if (payload.target_language !== 'ko' && systemPrompt === SYSTEM_PROMPT) systemPrompt = OTHER_LANGUAGE_PROMPT;
     const started = performance.now();
     const format = { type: 'object', additionalProperties: false, required: ['translations'], properties: {
@@ -142,12 +146,14 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
         } },
       },
     } };
+    const reqAbort = new AbortController();
+    activeAbort = reqAbort;
     const sendChat = m => fetchImpl(endpoint, {
       method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: m, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: JSON.stringify(payload) }],
         stream: false, think: false, format, keep_alive: '30m',
         options: { temperature: 0, num_ctx: 4096, num_predict: 2048 } }),
-      signal: AbortSignal.timeout(120000),
+      signal: AbortSignal.any([reqAbort.signal, AbortSignal.timeout(120000)]),
     });
     let response;
     try {
@@ -163,16 +169,56 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
       if (!response.ok) throw new Error(`Ollama returned HTTP ${response.status}. Check that ${activeModel} is installed locally.`);
       const result = await response.json();
       if (result.done_reason === 'length') throw new Error('Local translation output exceeded its token limit.');
+      if (killSwitch) throw new Error('Local Ollama translation was stopped by kill-switch.');
       ready = true; lastError = ''; calls++; lastUsedAt = Date.now();
       return { content: result.message?.content, elapsedMs: Math.round(performance.now() - started), loadMs: Math.round((result.load_duration || 0) / 1e6) };
     } catch (error) {
       ready = false; lastError = error.message;
       throw new Error(`Local Gemma translation unavailable: ${error.message}`, { cause: error });
+    } finally {
+      if (activeAbort === reqAbort) activeAbort = null;
     }
   }
 
-  function status() { return { provider: 'ollama', model: activeModel, revision: LOCAL_TRANSLATION_REVISION, ready, warming: Boolean(warming), warmedMs, calls, lastError }; }
+  function status() { return { provider: 'ollama', model: activeModel, revision: LOCAL_TRANSLATION_REVISION, ready, killSwitch, warming: Boolean(warming), warmedMs, calls, lastError }; }
+  function enable() {
+    killSwitch = false;
+    return status();
+  }
+  async function unload({ engageKillSwitch = true } = {}) {
+    if (engageKillSwitch) killSwitch = true;
+    activeAbort?.abort();
+    activeAbort = null;
+    ready = false;
+    warming = null;
+    const modelsToUnload = new Set([activeModel]);
+    try {
+      const psRes = await fetchImpl(psEndpoint, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(1500) });
+      if (psRes?.ok) {
+        const psData = await psRes.json();
+        for (const item of (Array.isArray(psData?.models) ? psData.models : [])) {
+          const name = String(item?.name || item?.model || '').trim();
+          if (name && (/^gemma/i.test(name) || name === activeModel)) {
+            modelsToUnload.add(name);
+          }
+        }
+      }
+    } catch {}
+    const unloaded = [];
+    for (const targetModel of modelsToUnload) {
+      try {
+        const res = await fetchImpl(endpoint, {
+          method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: targetModel, messages: [], keep_alive: 0 }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res?.ok) unloaded.push(targetModel);
+      } catch {}
+    }
+    return { ok: true, killSwitch, unloaded, model: activeModel };
+  }
   async function warm({ refresh = false } = {}) {
+    if (killSwitch) return status();
     if (warming) return warming;
     if (ready && (!refresh || Date.now() - lastUsedAt < 10 * 60 * 1000)) return status();
     warming = (async () => {
@@ -190,6 +236,7 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
   }
 
   async function translate(segments, settings = {}, metrics = {}, { onSegmentTranslated = null } = {}) {
+    if (killSwitch) throw new Error('Local Ollama translation is disabled by kill-switch.');
     await warm();
     const target = settings.targetLang || 'ko';
     const isChoiceQuestion = segment => /\bor\b/i.test(segment.text) && /let me know.*(?:think|comments)/i.test(segment.contextBefore || '');
@@ -281,5 +328,5 @@ export function createLocalTranslator({ baseUrl = 'http://127.0.0.1:11434', mode
     metrics.overBudgetSegments = segments.filter(segment => translated.get(segment.index).length > localTextBudget(segment, target)).length;
     return translated;
   }
-  return { status, warm, translate };
+  return { status, warm, translate, enable, unload };
 }

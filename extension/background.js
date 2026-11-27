@@ -9,6 +9,7 @@ const MESSAGE_HANDLERS = {
   YLD_SHORTCUTS_OPEN: async () => { await chrome.tabs.create({url: "chrome://extensions/shortcuts"}); return {opened:true}; },
   YLD_ACTION_STATE: updateActionState,
   YLD_ABORT_PREPARE: abortPrepare,
+  YLD_SYNC_MODE: syncRuntimeMode,
   YLD_API_SETTINGS_OPEN: openApiSettings,
   YLD_API_SETTINGS: apiSettingsRequest,
   YLD_PAGE_PROBE: executePageProbe,
@@ -57,6 +58,25 @@ async function abortPrepare(payload, sender) {
     }
   }
   return { aborted };
+}
+
+async function syncRuntimeMode(payload, sender) {
+  if (sender?.id !== chrome.runtime.id) return { ok: false };
+  const mode = String(payload?.mode || "").trim();
+  if (!["local", "gemma-gpt", "gpt-local", "gpt"].includes(mode)) return { ok: false };
+  const backendUrl = normalizeBackendUrl(payload?.backendUrl);
+  if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(backendUrl)) return { ok: false };
+  try {
+    const response = await fetch(`${backendUrl}/api/runtime/mode`, {
+      method: "POST",
+      signal: AbortSignal.timeout(4000),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode, active: Boolean(payload?.active) }),
+    });
+    return await readJsonResponse(response, "Runtime mode sync");
+  } catch {
+    return { ok: false, offline: true };
+  }
 }
 
 async function executePageProbe(payload, sender) {

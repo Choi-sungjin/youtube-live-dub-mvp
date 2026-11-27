@@ -104,7 +104,7 @@ async function contentFixture(overrides = {}) {
   const runtime = { id: "fixture", ...(overrides.runtimeSend ? { sendMessage: overrides.runtimeSend } : {}) };
   const context = vm.createContext({ chrome: { runtime }, window: overrides.window || {}, console: { error() {}, warn() {} }, URL, AbortController, AbortSignal, fetch: overrides.fetch, setTimeout, clearTimeout, setInterval, clearInterval, overrides, video });
   const injection = `
-    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, computeActionIconState, renderPlaybackStateUi, requestDubPrepare, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue, applyOriginalVolume, getSavedOriginalVolume, saveOriginalVolume, getSavedSfxPreserve, setSfxPreserve, ensureVocalSuppressorGraph };
+    globalThis.fixture = { state, els, startDub, stopDub, prepareAndAppendChunks, maybePrepareMoreAudio, getBufferInfo, syncAudioToVideo, applyDubSpeed, normalizeDubSpeed, dubbingSettingsFromControls, collectCaptionSegments, collectCaptionTracksWithBudget, maybeExpandTranscriptCoverage, maybeInstallExpandedSegments, computePlaybackUiState, computeActionIconState, renderPlaybackStateUi, requestDubPrepare, handleVideoInteractionEvents, cancelPlaybackHoldToUserPause, resumeFromUserPause, pauseFromUserControl, setAutoContinue, toggleAutoContinue, handleVideoTransition, maybeRunAutoContinue, applyOriginalVolume, getSavedOriginalVolume, saveOriginalVolume, getSavedSfxPreserve, setSfxPreserve, ensureVocalSuppressorGraph, syncBackendMode };
     state.videoId = 'abcdefghijk'; state.lastKnownVideoId = 'abcdefghijk'; state.video = video;
     if (overrides.videoIdFn) getVideoId = overrides.videoIdFn;
     for (const key of ['start','stop','test','volume','volumeLabel','backend','voice','lang','model','ttsProvider','pitch','variance','speed']) els[key] = {value:'1',disabled:false};
@@ -1229,4 +1229,69 @@ test('original volume persists across sessions and Mid/Side vocal suppressor mut
   fFallback.applyOriginalVolume();
   assert.equal(fFallback.video.volume, 0.8);
   fFallback.stopDub();
+});
+
+test('Ollama kill-switch prevents boot/idle calls, unloads only Gemma with keep_alive: 0, and aborts in-flight requests when non-local mode is selected', async () => {
+  const calls = [];
+  let hangResolve = null;
+  let shouldHang = false;
+  const translator = createLocalTranslator({
+    baseUrl: 'http://127.0.0.1:11435',
+    model: 'gemma4:e2b',
+    initialKillSwitch: true,
+    fetchImpl: async (url, init) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      calls.push({ url, method: init?.method || 'GET', body });
+      if (url.endsWith('/api/ps')) {
+        return new Response(JSON.stringify({
+          models: [{ name: 'gemma4:e2b' }, { name: 'gemma4:e4b-it-q4_K_M' }, { name: 'qwen3.5-9b-cpu:latest' }],
+        }), { status: 200 });
+      }
+      if (shouldHang) {
+        return await new Promise((resolve, reject) => {
+          hangResolve = resolve;
+          init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+        });
+      }
+      if (body?.keep_alive === 0) {
+        return new Response(JSON.stringify({ done: true }), { status: 200 });
+      }
+      return localResponse([{ index: 0, text: '준비' }]);
+    },
+  });
+
+  // 1) Initial kill-switch engaged: warm() is a no-op and translate() is blocked with 0 Ollama HTTP calls
+  assert.equal(translator.status().killSwitch, true);
+  await translator.warm();
+  await assert.rejects(translator.translate([{ index: 0, start: 0, end: 2, text: 'Hi' }]), /kill-switch/);
+  assert.equal(calls.length, 0);
+
+  // 2) Explicit local mode enables Ollama
+  translator.enable();
+  assert.equal(translator.status().killSwitch, false);
+  await translator.warm();
+  assert.equal(translator.status().ready, true);
+  assert.equal(calls.length, 1);
+
+  // 3) Switching away from local engages kill-switch: aborts in-flight work and unloads Gemma models with keep_alive: 0 (never touching unrelated qwen model)
+  shouldHang = true;
+  const inFlight = translator.translate([{ index: 0, start: 0, end: 2, text: 'In flight' }]);
+  await new Promise(r => setTimeout(r, 5));
+  shouldHang = false;
+  const unloadRes = await translator.unload({ engageKillSwitch: true });
+  await assert.rejects(inFlight, /unavailable/);
+  assert.equal(unloadRes.killSwitch, true);
+  assert.equal(translator.status().ready, false);
+  assert.deepEqual(unloadRes.unloaded.sort(), ['gemma4:e2b', 'gemma4:e4b-it-q4_K_M']);
+  const unloadPosts = calls.filter(c => c.body?.keep_alive === 0).map(c => c.body.model);
+  assert.ok(!unloadPosts.includes('qwen3.5-9b-cpu:latest'));
+
+  // 4) Content script syncBackendMode sends YLD_SYNC_MODE to background
+  const sent = [];
+  const f = await contentFixture({ runtimeSend: async msg => { sent.push(msg); return { ok: true }; } });
+  f.syncBackendMode('gpt', false);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'YLD_SYNC_MODE');
+  assert.equal(sent[0].payload.mode, 'gpt');
+  assert.equal(sent[0].payload.active, false);
 });

@@ -42,9 +42,17 @@ report.ok = true;
 console.log(JSON.stringify(report, null, 2));
 
 async function checkHealth() {
-  const body = await fetchJson(`${backendUrl}/api/health`);
-  assert(body.ok, 'Backend health did not return ok=true.');
-  const translation = selectedMode?.translationProvider || body.provider?.translation;
+  const preCheck = await fetchJson(`${backendUrl}/api/health`);
+  assert(preCheck.ok, 'Backend health did not return ok=true.');
+  const translation = selectedMode?.translationProvider || preCheck.provider?.translation;
+  if (translation === 'ollama') {
+    await fetchJson(`${backendUrl}/api/runtime/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: options.mode || 'local', active: true, warm: true }),
+    });
+  }
+  const body = translation === 'ollama' ? await fetchJson(`${backendUrl}/api/health`) : preCheck;
   if (translation === 'ollama') assert(body.localTranslation?.ready, 'Gemma is not ready.');
   if (translation === 'zai') assert(body.provider?.zaiConfigured, 'Z.ai is not configured.');
   if (translation === 'openai' || settings.ttsProvider === 'openai-realtime') assert(body.provider?.openaiConfigured, 'OpenAI is not configured.');

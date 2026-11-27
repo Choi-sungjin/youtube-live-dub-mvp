@@ -6,7 +6,7 @@
 
   const PANEL_ID = "yld-panel";
   const VIDEO_HUD_ID = "yld-video-hud";
-  const BUILD_VERSION = "0.9.10";
+  const BUILD_VERSION = "0.9.11";
   const DEFAULT_BACKEND_URL = "http://127.0.0.1:18789";
   const BACKEND_STORAGE_KEY = "yld-backend-url";
   const PANEL_VISIBLE_STORAGE_KEY = "yld-panel-visible";
@@ -442,10 +442,13 @@
       els.panel.querySelector(`[name="yld-mode"][value="${mode}"]`).checked = true;
       updateSummaryLabel();
       els.panel.querySelector('[data-yld-mode-note]').textContent = mode === 'local'
-        ? '번역·음성 모두 이 PC에서 처리해요. 외부 AI API 요금이 없어요.'
-        : '선택한 단계의 텍스트를 OpenAI로 전송해요. API 사용량에 따라 과금돼요. 연결된 키가 필요해요.';
+        ? '번역·음성 모두 이 PC에서 처리해요 (Start 시 로컬 Ollama 구동 · 미선택 시 자동 종료).'
+        : mode === 'gemma-gpt'
+          ? '번역은 로컬 Gemma 4, 음성은 OpenAI Realtime으로 처리해요.'
+          : '선택한 단계를 OpenAI로 전송해요 · 로컬 미선택 킬-스위치로 Ollama가 즉시 꺼져요.';
       try { localStorage.setItem('yld-dubbing-mode', mode); } catch {}
       updateSpeechControls();
+      syncBackendMode(mode, false);
     }
     els.openaiModel?.addEventListener('change', () => {
       try { localStorage.setItem('yld-openai-model', els.openaiModel.value); } catch {}
@@ -1586,6 +1589,20 @@
   function revokeObjectUrls() {
     state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
     state.objectUrls = [];
+  }
+
+  function syncBackendMode(mode, active = false) {
+    if (state.connectionLost || typeof chrome?.runtime?.sendMessage !== "function" || !hasRuntimeConnection()) {
+      return;
+    }
+    Promise.resolve(chrome.runtime.sendMessage({
+      type: "YLD_SYNC_MODE",
+      payload: {
+        backendUrl: els.backend?.value || DEFAULT_BACKEND_URL,
+        mode: mode || els.panel?.dataset?.mode || "local",
+        active: Boolean(active),
+      },
+    })).catch(() => {});
   }
 
   function abortActivePrepares() {
